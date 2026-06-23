@@ -17,7 +17,8 @@
   *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
   html,body{margin:0;height:100%;}
   body{
-    background: radial-gradient(120% 90% at 50% -10%, #2c1d10 0%, #150d06 60%, #0d0703 100%);
+    background:
+      radial-gradient(120% 90% at 50% -10%, #2c1d10 0%, #150d06 60%, #0d0703 100%);
     color:var(--ink);
     font-family:"Heebo","Assistant",system-ui,-apple-system,"Segoe UI",Arial,sans-serif;
     display:flex;flex-direction:column;align-items:center;
@@ -101,7 +102,6 @@
   <div class="controls">
     <button class="btn" id="newBtn">משחק חדש</button>
     <button class="btn" id="undoBtn">ביטול מהלך</button>
-    <button class="btn" id="exportBtn" style="border-color:#e7b13c55;color:#e7b13c;" disabled>📋 העתק נתונים <span id="gameCount">(0)</span></button>
   </div>
 
   <div class="status">
@@ -123,6 +123,16 @@
     </div>
   </div>
   <div class="thinking" id="thinking"></div>
+  <div id="logWrap" style="display:none;width:min(94vw,470px);margin-top:2px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
+      <span id="logLabel" style="font-size:12.5px;font-weight:600;color:var(--ink-dim)">נתוני משחקים לניתוח</span>
+      <div style="display:flex;gap:6px;">
+        <button class="btn" id="clearLogBtn" style="font-size:12px;padding:4px 11px;">נקה</button>
+        <button class="btn" id="copyLogBtn" style="font-size:12px;padding:4px 11px;">העתק הכל</button>
+      </div>
+    </div>
+    <textarea id="logOut" readonly style="width:100%;height:88px;background:#00000033;border:1px solid #ffffff14;border-radius:8px;color:var(--ink-dim);font-size:10.5px;font-family:monospace;padding:8px;resize:vertical;"></textarea>
+  </div>
 
   <details class="rules">
     <summary>איך משחקים?</summary>
@@ -137,7 +147,7 @@
   </details>
 
 <script>
-/* =================== OCTI CORE =================== */
+/* =================== OCTI CORE (shared with the AI worker) =================== */
 const CORE_SRC = String.raw`
 globalThis.OCTI = (function(){
 const W = 6, H = 7;
@@ -150,7 +160,6 @@ function popcount(n){ let c=0; while(n){ n&=n-1; c++; } return c; }
 function homeCells(p){ const y = p===0 ? H-2 : 1; return [idx(1,y),idx(2,y),idx(3,y),idx(4,y)]; }
 const HOME = [homeCells(0), homeCells(1)];
 const HOME_SET = [new Set(HOME[0]), new Set(HOME[1])];
-
 function initState(){
   const board = new Array(W*H).fill(null);
   for(const i of HOME[0]) board[i] = {player:0, prongs:0};
@@ -207,55 +216,33 @@ function genMoves(s){
   return moves;
 }
 function applyMove(s, m){
-  const ns = cloneState(s);
-  const b = ns.board, p = ns.toMove;
+  const ns = cloneState(s); const b = ns.board, p = ns.toMove;
   if(m.type==='add'){ b[m.from].prongs |= (1<<m.dir); ns.reserve[p] -= 1; }
   else if(m.type==='move'){ b[m.to] = b[m.from]; b[m.from] = null; }
   else if(m.type==='jump'){
     const pod = b[m.from]; b[m.from] = null;
-    for(const mi of m.jumped){ const t=b[mi];
-      if(t && t.player!==p){ ns.reserve[p]+=popcount(t.prongs); b[mi]=null; } }
+    for(const mi of m.jumped){ const t=b[mi]; if(t && t.player!==p){ ns.reserve[p]+=popcount(t.prongs); b[mi]=null; } }
     b[m.to] = pod;
   }
   if((m.type==='move'||m.type==='jump') && HOME_SET[1-p].has(m.to)) ns.winner = p;
   ns.toMove = 1 - p;
   return ns;
 }
-
-/* ---- Zobrist hashing ---- */
+/* ---- AI ---- */
+const WIN_SCORE = 1e7;
+// Zobrist table: 42 cells * 2 players * 256 prong combos + reserves + turn
 const ZR=(function(){
   const t=new Int32Array(42*512+28);
   let s=0x9E3779B9|0;
   for(let i=0;i<t.length;i++){s=Math.imul(s^(s>>>16),0x45d9f3b|0);s^=s>>>16;t[i]=s;}
   return t;
 })();
-
-const TT_SIZE=1<<20;
+// Transposition table: 512k slots
+const TT_SIZE=1<<19;
 const tt_key=new Int32Array(TT_SIZE);
 const tt_dep=new Int8Array(TT_SIZE);
 const tt_scr=new Int32Array(TT_SIZE);
-const tt_flg=new Uint8Array(TT_SIZE);
-const tt_mov=new Int32Array(TT_SIZE);
-
-function packMove(m) {
-  if (!m) return 0;
-  const typeId = m.type === 'add' ? 1 : m.type === 'move' ? 2 : 3;
-  const from = m.from;
-  const to = m.to !== null && m.to !== undefined ? m.to : 63;
-  const dir = m.dir !== null && m.dir !== undefined ? m.dir : 15;
-  return typeId | (from << 2) | (to << 8) | (dir << 14);
-}
-
-function unpackMove(val) {
-  if (val === 0) return null;
-  const typeId = val & 3;
-  const type = typeId === 1 ? 'add' : typeId === 2 ? 'move' : 'jump';
-  const from = (val >> 2) & 63;
-  const toVal = (val >> 8) & 63;
-  const dirVal = (val >> 14) & 15;
-  return { type, from, to: toVal === 63 ? null : toVal, dir: dirVal === 15 ? null : dirVal };
-}
-
+const tt_flg=new Uint8Array(TT_SIZE); // 0=exact,1=lower,2=upper
 function zhash(s){
   let h=s.toMove?ZR[ZR.length-1]:0;
   for(let i=0;i<s.board.length;i++){
@@ -266,409 +253,213 @@ function zhash(s){
   h^=ZR[42*512+13+s.reserve[1]];
   return h;
 }
-
 function chebToHome(i, home){
   const x=cx(i), y=cy(i); let best=99;
   for(const h of home){ const d=Math.max(Math.abs(x-cx(h)),Math.abs(y-cy(h))); if(d<best)best=d; }
   return best;
 }
-
-const WIN_SCORE = 1e7;
-
-function turnsToWin(i, prongs, reserve, enemyHome){
-  const x=cx(i), y=cy(i);
-  let minD=99;
-  for(const h of enemyHome){
-    const d=Math.max(Math.abs(x-cx(h)),Math.abs(y-cy(h)));
-    if(d<minD)minD=d;
-  }
-  if(minD===0) return 0;
-  let fwd=0;
-  for(let d=0;d<8;d++){
-    if(!(prongs&(1<<d))) continue;
-    const dx=DIRS[d][0], dy=DIRS[d][1];
-    for(const h of enemyHome){
-      const nx=x+dx, ny=y+dy;
-      if(inB(nx,ny)&&Math.max(Math.abs(nx-cx(h)),Math.abs(ny-cy(h)))<minD){fwd++;break;}
-    }
-    if(fwd) break;
-  }
-  if(fwd===0) return (reserve>0?1:99)+minD;
-  return minD;
-}
-
-function podThreatens(i, prongs, reserve, enemyHome){
-  if(prongs===0&&reserve===0) return false;
-  const x=cx(i), y=cy(i);
-  for(const h of enemyHome){
-    const d=Math.max(Math.abs(x-cx(h)),Math.abs(y-cy(h)));
-    if(d !== 1) continue;
-    const dx=cx(h)-x, dy=cy(h)-y;
-    for(let dir=0;dir<8;dir++){
-      if(!(prongs&(1<<dir))) continue;
-      if(DIRS[dir][0]===dx&&DIRS[dir][1]===dy) return true;
-    }
-  }
-  return false;
-}
-
 function evaluate(s){
   if(s.winner!==null) return s.winner===s.toMove ? WIN_SCORE : -WIN_SCORE;
   const p=s.toMove, q=1-p, b=s.board;
   let score=0, myPods=0, opPods=0;
   let myMinTTW=99, opMinTTW=99, myThreats=0, opThreats=0;
-
   for(let i=0;i<b.length;i++){
     const pod=b[i]; if(!pod) continue;
     const isMe=pod.player===p;
-
     let fwd=0, lat=0;
-    const podX=cx(i), podY=cy(i);
     for(let d=0;d<8;d++){
       if(!(pod.prongs&(1<<d))) continue;
-      const dy=DIRS[d][1];
-      const towardHome = isMe ? (p===0 ? dy<0 : dy>0) : (q===0 ? dy<0 : dy>0);
-      if(towardHome) fwd++; else if(dy===0) lat++;
+      const dy=DIRS[d][1], up=(isMe?p:q)===0;
+      if(up?dy<0:dy>0) fwd++; else if(dy===0) lat++;
     }
-    const total=popcount(pod.prongs);
-    const pv=fwd*3+lat;
-
+    const total=popcount(pod.prongs), pv=fwd*3+lat;
     if(isMe){
-      myPods++;
-      score+=pv*10;
-      const distToGoal=chebToHome(i,HOME[q]);
-      score+=(7-distToGoal)*14;
-      const ttw=turnsToWin(i,pod.prongs,s.reserve[p],HOME[q]);
-      if(ttw<myMinTTW) myMinTTW=ttw;
-      if(ttw<=2) myThreats++;
-      score+=total*4;
-      if(HOME_SET[p].has(i) && total===0 && s.reserve[p]===0) score-=30;
-    } else {
-      opPods++;
-      score-=pv*10;
-      const distToGoal=chebToHome(i,HOME[p]);
-      score-=(7-distToGoal)*14;
-      const ttw=turnsToWin(i,pod.prongs,s.reserve[q],HOME[p]);
-      if(ttw<opMinTTW) opMinTTW=ttw;
-      if(ttw<=2) opThreats++;
-      score-=total*4;
-      if(podThreatens(i,pod.prongs,s.reserve[q],HOME[p])) score-=120;
-    }
-    if(isMe && podThreatens(i,pod.prongs,s.reserve[p],HOME[q])) score+=100;
-  }
-
-  score+=8*(s.reserve[p]-s.reserve[q]);
-  score+=80*(myPods-opPods);
-  score+=55*(myThreats-opThreats);
-
-  if(myMinTTW<99&&opMinTTW<99){
-    score+=200*(opMinTTW-myMinTTW);
-  } else if(myMinTTW<99){
-    score+=200*(7-myMinTTW);
-  } else if(opMinTTW<99){
-    score-=200*(7-opMinTTW);
-  }
-
-  // Amplified Imminent Threat System to prevent blunder blindspots
-  if (myMinTTW === 1) score += 8000000;
-  if (opMinTTW === 1) score -= 8500000;
-  if (myMinTTW === 2) score += 50000;
-  if (opMinTTW === 2) score -= 55000;
-
-  for(const h of HOME[p]){
-    if(b[h]===null){
-      let nearDist=99;
-      for(let i=0;i<b.length;i++){
-        const pod=b[i];
-        if(pod&&pod.player===q){
-          const d=Math.max(Math.abs(cx(i)-cx(h)),Math.abs(cy(i)-cy(h)));
-          if(d<nearDist)nearDist=d;
-        }
+      myPods++; score+=pv*8;
+      if(total>0){
+        const d=chebToHome(i,HOME[q]); score+=(7-d)*12;
+        const ttw=fwd>0?d:(s.reserve[p]>0?d+1:99);
+        if(ttw<myMinTTW)myMinTTW=ttw; if(ttw<=3)myThreats++;
+      } else if(s.reserve[p]>0){
+        const ttw=chebToHome(i,HOME[q])+1;
+        if(ttw<myMinTTW)myMinTTW=ttw;
       }
-      if(nearDist<=2) score-=60*(3-nearDist);
+    } else {
+      opPods++; score-=pv*8;
+      if(total>0){
+        const d=chebToHome(i,HOME[p]); score-=(7-d)*12;
+        const ttw=fwd>0?d:(s.reserve[q]>0?d+1:99);
+        if(ttw<opMinTTW)opMinTTW=ttw; if(ttw<=3)opThreats++;
+      } else if(s.reserve[q]>0){
+        const ttw=chebToHome(i,HOME[p])+1;
+        if(ttw<opMinTTW)opMinTTW=ttw;
+      }
     }
   }
+  score+=7*(s.reserve[p]-s.reserve[q]);
+  score+=70*(myPods-opPods);
+  score+=45*(myThreats-opThreats);
+  // Race: turns-to-win gap is the dominant strategic factor
+  if(myMinTTW<99&&opMinTTW<99) score+=180*(opMinTTW-myMinTTW);
+  else if(myMinTTW<99) score+=180*(7-myMinTTW);
+  else if(opMinTTW<99) score-=180*(7-opMinTTW);
+  if(myMinTTW<=1) score+=600; if(opMinTTW<=1) score-=650;
+  if(myMinTTW<=2) score+=250; if(opMinTTW<=2) score-=270;
   return score;
 }
-
 function moveOrderKey(s, m){
-  const p=s.toMove, b=s.board;
-  if((m.type==='move'||m.type==='jump')&&HOME_SET[1-p].has(m.to)) return 100000;
+  const p=s.toMove;
+  if((m.type==='move'||m.type==='jump')&&HOME_SET[1-p].has(m.to)) return 3000;
   if(m.type==='jump'){
-    const caps=m.jumped.filter(mi=>b[mi]&&b[mi].player!==p);
-    const capScore=caps.length*200;
-    const landDist=chebToHome(m.to,HOME[1-p]);
-    return 5000+capScore+(7-landDist)*25+m.jumped.length*30;
+    let cap=0; for(const mi of m.jumped){const t=s.board[mi];if(t&&t.player!==p)cap++;}
+    return 1000+cap*150+m.jumped.length*20;
   }
   if(m.type==='move'){
     const d0=chebToHome(m.from,HOME[1-p]),d1=chebToHome(m.to,HOME[1-p]);
-    const progress=(d0-d1)*100;
-    const pod=b[m.from];
-    const nextTTW=turnsToWin(m.to,pod.prongs,s.reserve[p],HOME[1-p]);
-    const threatBonus = nextTTW<=1 ? 500 : (nextTTW<=2 ? 200 : 0);
-    return 1000+progress+threatBonus;
+    return 300+(d0-d1)*80;
   }
-  const dy=DIRS[m.dir][1];
-  const pod=b[m.from];
-  const distToGoal=chebToHome(m.from,HOME[1-p]);
-  const isForward = (p===0?dy<0:dy>0);
-  const fwdBonus = isForward ? 80 : (dy===0?30:0);
-  const proxBonus = (7-distToGoal)*15;
-  const fillBonus = popcount(pod.prongs)*20;
-  return 200+fwdBonus+proxBonus+fillBonus;
+  const dy=DIRS[m.dir][1],up=p===0;
+  return (up?dy<0:dy>0)?100:25;
 }
-
-const KILLER_SLOTS=2, MAX_DEPTH=32;
-const killerFrom=new Int8Array(MAX_DEPTH*KILLER_SLOTS).fill(-1);
-const killerTo=new Int8Array(MAX_DEPTH*KILLER_SLOTS).fill(-1);
-const killerType=new Uint8Array(MAX_DEPTH*KILLER_SLOTS);
-
-function storeKiller(depth, m){
-  if(m.type==='add') return;
-  const base=depth*KILLER_SLOTS;
-  if(killerFrom[base]===m.from&&killerTo[base]===m.to) return;
-  killerFrom[base+1]=killerFrom[base]; killerTo[base+1]=killerTo[base]; killerType[base+1]=killerType[base];
-  killerFrom[base]=m.from; killerTo[base]=m.to; killerType[base]=(m.type==='jump'?1:0);
-}
-function isKiller(depth, m){
-  if(m.type==='add') return false;
-  const base=depth*KILLER_SLOTS;
-  for(let k=0;k<KILLER_SLOTS;k++) if(killerFrom[base+k]===m.from&&killerTo[base+k]===m.to) return true;
-  return false;
-}
-
 let _nc=0;
-function negamax(s, depth, alpha, beta, deadline, allowNull, ply){
+function negamax(s, depth, alpha, beta, deadline, allowNull){
   if(depth===0) return evaluate(s);
-  if(!(++_nc&2047)&&Date.now()>deadline) return evaluate(s);
-
+  if(!(++_nc&1023)&&Date.now()>deadline) return evaluate(s);
   const h=zhash(s), slot=(h>>>0)&(TT_SIZE-1), origAlpha=alpha;
-  let ttMove = null;
-
-  if(tt_key[slot]===h){
-    ttMove = unpackMove(tt_mov[slot]);
-    if(tt_dep[slot]>=depth){
-      let sc=tt_scr[slot];
-      if(sc > WIN_SCORE/2) sc -= ply;
-      else if(sc < -WIN_SCORE/2) sc += ply;
-      
-      const f=tt_flg[slot];
-      if(f===0) return sc;
-      if(f===1){if(sc>alpha)alpha=sc;}else{if(sc<beta)beta=sc;}
-      if(alpha>=beta) return sc;
-    }
+  if(tt_key[slot]===h&&tt_dep[slot]>=depth){
+    const f=tt_flg[slot],sc=tt_scr[slot];
+    if(f===0) return sc;
+    if(f===1){if(sc>alpha)alpha=sc;}else{if(sc<beta)beta=sc;}
+    if(alpha>=beta) return sc;
   }
-
-  if(allowNull&&depth&&beta<WIN_SCORE/2&&s.board.some((c,i)=>c&&c.player===s.toMove&&popcount(c.prongs)>0)){
-    const R=depth>=5?3:2;
+  // Null move pruning: skip our turn — if still winning, prune this entire branch
+  if(allowNull&&depth>=4&&beta<WIN_SCORE/2){
+    const R=depth>=6?3:2;
     const ns={board:s.board,reserve:s.reserve,toMove:1-s.toMove,winner:null};
-    const nullVal=-negamax(ns,Math.max(0,depth-1-R),-beta,-beta+1,deadline,false,ply+1);
-    if(nullVal>=beta) return beta;
+    if(-negamax(ns,depth-1-R,-beta,-beta+1,deadline,false)>=beta) return beta;
   }
-
   let moves=genMoves(s);
   if(moves.length===0) return -WIN_SCORE-depth;
-
-  moves.sort((a,b)=>{
-    if(ttMove){
-      const aIsTt = a.type===ttMove.type && a.from===ttMove.from && a.to===ttMove.to && a.dir===ttMove.dir;
-      const bIsTt = b.type===ttMove.type && b.from===ttMove.from && b.to===ttMove.to && b.dir===ttMove.dir;
-      if(aIsTt) return -1;
-      if(bIsTt) return 1;
-    }
-    let sa=moveOrderKey(s,a), sb=moveOrderKey(s,b);
-    if(isKiller(ply,a)) sa+=400;
-    if(isKiller(ply,b)) sb+=400;
-    return sb-sa;
-  });
-
-  let best=-Infinity, bestMove=null;
-  let movesSearched=0;
-
+  moves.sort((a,b)=>moveOrderKey(s,b)-moveOrderKey(s,a));
+  let best=-Infinity;
   for(const m of moves){
     const ns=applyMove(s,m);
-    let val;
-    if(ns.winner===s.toMove){
-      val=WIN_SCORE+depth;
-    } else {
-      let newDepth=depth-1;
-      if(movesSearched>=4&&depth>=3&&m.type==='add'&&!isKiller(ply,m)){
-        newDepth=depth-2;
-      }
-      val=-negamax(ns,newDepth,-beta,-alpha,deadline,true,ply+1);
-      if(newDepth<depth-1&&val>alpha){
-        val=-negamax(ns,depth-1,-beta,-alpha,deadline,true,ply+1);
-      }
-    }
-    movesSearched++;
-    if(val>best){best=val;bestMove=m;}
-    if(val>alpha)alpha=val;
-    if(alpha>=beta){
-      storeKiller(ply,m);
-      break;
-    }
+    const val=(ns.winner===s.toMove)?(WIN_SCORE+depth):-negamax(ns,depth-1,-beta,-alpha,deadline,true);
+    if(val>best)best=val;
+    if(best>alpha)alpha=best;
+    if(alpha>=beta)break;
   }
-
-  let ttVal = best;
-  if(ttVal > WIN_SCORE/2) ttVal += ply;
-  else if(ttVal < -WIN_SCORE/2) ttVal -= ply;
-
-  tt_key[slot]=h; tt_dep[slot]=depth; tt_scr[slot]=ttVal;
+  tt_key[slot]=h; tt_dep[slot]=depth; tt_scr[slot]=best;
   tt_flg[slot]=best<=origAlpha?2:best>=beta?1:0;
-  if(bestMove) tt_mov[slot]=packMove(bestMove);
-
   return best;
 }
-
-function bestAtDepth(s, moves, depth, deadline, prevScored){
-  let alpha=-Infinity, beta=Infinity;
-  const sortedMoves = moves.slice().sort((a,b)=>{
-    if(prevScored){
-      const sa=prevScored.find(o=>o.move===a||(o.move.type===a.type&&o.move.from===a.from&&o.move.to===a.to))||{v:0};
-      const sb=prevScored.find(o=>o.move===b||(o.move.type===b.type&&o.move.from===b.from&&o.move.to===b.to))||{v:0};
-      return sb.v-sa.v;
-    }
-    return moveOrderKey(s,b)-moveOrderKey(s,a);
-  });
-  let best=-Infinity, bestMove=sortedMoves[0]; const scored=[];
-  if(prevScored&&prevScored.length>0){
-    const prevBest=Math.max(...prevScored.map(o=>o.v));
-    if(Math.abs(prevBest)<WIN_SCORE/2){ alpha=prevBest-80; beta=prevBest+80; }
-  }
-  for(let attempt=0;attempt<3;attempt++){
-    best=-Infinity; bestMove=sortedMoves[0]; scored.length=0;
-    let localAlpha=alpha;
-    for(const m of sortedMoves){
-      const ns=applyMove(s,m);
-      let val;
-      if(ns.winner===s.toMove){ val=WIN_SCORE+depth; }
-      else { val=-negamax(ns,depth-1,-beta,-localAlpha,deadline,true,1); }
-      scored.push({move:m,v:val});
-      if(val>best){best=val;bestMove=m;}
-      if(best>localAlpha)localAlpha=best;
-      if(localAlpha>=beta){ break; }
-      if(Date.now()>deadline) break;
-    }
-    if(best<=alpha&&attempt<2){ alpha=best-200; beta=best+200; continue; }
-    if(best>=beta&&attempt<2){ alpha=best-200; beta=best+200; continue; }
-    break;
+function bestAtDepth(s, moves, depth, deadline){
+  moves=moves.slice().sort((a,b)=>moveOrderKey(s,b)-moveOrderKey(s,a));
+  let best=-Infinity,bestMove=moves[0],alpha=-Infinity; const scored=[];
+  for(const m of moves){
+    const ns=applyMove(s,m);
+    const val=(ns.winner===s.toMove)?(WIN_SCORE+depth):-negamax(ns,depth-1,-Infinity,-alpha,deadline,true);
+    scored.push({move:m,v:val});
+    if(val>best){best=val;bestMove=m;}
+    if(best>alpha)alpha=best;
+    if(Date.now()>deadline)break;
   }
   return {move:bestMove,best,scored};
 }
-
-const OPENING_BOOK_P0 = [
-  [{type:'add',from:32,dir:0},{type:'add',from:33,dir:0}],
-  [{type:'add',from:32,dir:0},{type:'add',from:33,dir:0}],
-  [{type:'add',from:31,dir:1},{type:'add',from:34,dir:7}],
-];
-const OPENING_BOOK_P1 = [
-  [{type:'add',from:8,dir:4},{type:'add',from:9,dir:4}],
-  [{type:'add',from:8,dir:4},{type:'add',from:9,dir:4}],
-  [{type:'add',from:7,dir:3},{type:'add',from:10,dir:5}],
-];
-let _bookMoveIdx=0;
-let _bookPattern=0;
-
 function pickMove(s, difficulty){
   const moves=genMoves(s);
-  if(moves.length===0) return {move:null, scored:[], depth:0};
-  for(const m of moves) if((m.type==='move'||m.type==='jump')&&HOME_SET[1-s.toMove].has(m.to)) return {move:m, scored:[{move:m,v:WIN_SCORE}], depth:0};
+  if(moves.length===0) return null;
+  for(const m of moves) if((m.type==='move'||m.type==='jump')&&HOME_SET[1-s.toMove].has(m.to)) return m;
   _nc=0;
-  if(difficulty!=='easy'){
-    const book = s.toMove===0 ? OPENING_BOOK_P0 : OPENING_BOOK_P1;
-    let pronged=0;
-    for(let i=0;i<s.board.length;i++){ const pod=s.board[i]; if(pod&&pod.player===s.toMove&&pod.prongs>0) pronged++; }
-    if(pronged<2){
-      const pat = book[(_bookPattern + s.toMove*3) % book.length];
-      const bmove = pat[pronged];
-      if(bmove && moves.some(m=>m.type===bmove.type&&m.from===bmove.from&&('dir' in bmove?m.dir===bmove.dir:true))){
-        if(pronged===0 && Math.random()<0.4) _bookPattern=(_bookPattern+1)%book.length;
-        return {move:moves.find(m=>m.type===bmove.type&&m.from===bmove.from&&m.dir===bmove.dir), scored:[], depth:0, book:true};
-      }
+  if(difficulty==='easy'){
+    const deadline=Date.now()+700; let chosen=moves[0];
+    for(let d=2;d<=10;d++){
+      const r=bestAtDepth(s,moves,d,deadline);
+      if(r.move)chosen=r.move;
+      if(Date.now()>deadline)break;
+      if(Math.abs(r.best)>=WIN_SCORE)break;
     }
+    return chosen;
   }
-
-  let maxD = difficulty === 'easy' ? 2 : difficulty === 'medium' ? 5 : 8;
-  let deadline = Date.now() + (difficulty === 'easy' ? 200 : difficulty === 'medium' ? 1000 : 3500);
-  let bestMove = moves[0], finalScored = [], searchDepth = 0;
-  let prevScored = null;
-  for(let d=1; d<=maxD; d++){
-    let res = bestAtDepth(s, moves, d, deadline, prevScored);
-    if(Date.now() > deadline && d > 1) break;
-    bestMove = res.move; finalScored = res.scored; searchDepth = d;
-    prevScored = res.scored;
-    if(res.best >= WIN_SCORE/2 || res.best <= -WIN_SCORE/2) break;
+  if(difficulty==='medium'){
+    const deadline=Date.now()+1200; let chosen=moves[0]; let lastScored=[];
+    for(let d=2;d<=14;d++){
+      const r=bestAtDepth(s,moves,d,deadline);
+      if(r.move){chosen=r.move;lastScored=r.scored;}
+      if(Date.now()>deadline)break;
+      if(Math.abs(r.best)>=WIN_SCORE)break;
+    }
+    if(lastScored.length>0){
+      const bestVal=Math.max(...lastScored.map(o=>o.v));
+      const near=lastScored.filter(o=>o.v>=bestVal-40);
+      return near[(Math.random()*near.length)|0].move;
+    }
+    return chosen;
   }
-  return {move:bestMove, scored:finalScored, depth:searchDepth};
+  // hard: null move + warm TT across moves = effective depth far exceeds nominal
+  const deadline=Date.now()+2000; let chosen=moves[0]; let lastScored=[];
+  for(let d=2;d<=20;d++){
+    const r=bestAtDepth(s,moves,d,deadline);
+    if(r.move){chosen=r.move;lastScored=r.scored;}
+    if(Date.now()>deadline)break;
+    if(Math.abs(r.best)>=WIN_SCORE)break;
+  }
+  // small variety to avoid identical openings every game
+  if(lastScored.length>0){
+    const bestVal=Math.max(...lastScored.map(o=>o.v));
+    const near=lastScored.filter(o=>o.v>=bestVal-15);
+    return near[(Math.random()*near.length)|0].move;
+  }
+  return chosen;
 }
-
-return { pickMove, applyMove, genMoves, initState, cloneState, evaluate };
+return {W,H,DIRS,idx,cx,cy,inB,popcount,HOME,HOME_SET,initState,cloneState,genMoves,applyMove,pickMove};
 })();
-
-self.onmessage = function(e){
-  const { s, difficulty } = e.data;
-  const res = globalThis.OCTI.pickMove(s, difficulty);
-  self.postMessage(res);
-};
 `;
-/* =================== END CORE =================== */
+// run the core (defines globalThis.OCTI without leaking anything), then pull what the UI needs
+eval(CORE_SRC);
+const {W,H,DIRS,idx,cx,cy,inB,popcount,HOME,HOME_SET,initState,cloneState,genMoves,applyMove} = globalThis.OCTI;
 
-// Main UI Code
-const W = 6, H = 7;
-const DIRS = [[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,1],[-1,0],[-1,-1]];
-const idx = (x,y) => y*W + x;
-const cx  = i => i % W;
-const cy  = i => (i / W) | 0;
+/* =================== AI WORKER (off the main thread) =================== */
+const workerGlue = `
+self.onmessage = function(e){
+  self.postMessage({move: globalThis.OCTI.pickMove(e.data.state, e.data.difficulty)});
+};`;
+const aiWorker = new Worker(URL.createObjectURL(
+  new Blob([CORE_SRC + workerGlue], {type:'application/javascript'})
+));
 
-let game, humanPlayer=0, selected=null, history=[], busy=false, anim=null, difficulty='medium';
-let cell=64, ox=20, oy=20, BW=20;
+/* =================== UI / RENDER =================== */
 const cv = document.getElementById('cv');
 const ctx = cv.getContext('2d');
-const ov = document.getElementById('overlay');
+const COL = { board:'#ece2c6', board2:'#e3d6b2', grid:'rgba(120,92,52,.32)',
+  frame1:'#3c2c1d', frame2:'#23160c', gold:'#e7b13c', goldD:'#a9772a',
+  p0:['#27a888','#1c8f74','#0c5a47'], p1:['#e85a44','#d64430','#992517'] };
+const FRAME = 14; // px of wooden frame inside canvas (scaled)
+let cell=60, ox=0, oy=0, DPR=1, BW=0;
 
-const COL = {
-  bg: '#1b120a', frame1: '#3c2c1d', frame2: '#23160c',
-  board: '#ece2c6', board2: '#e3d6b2', gold: '#e7b13c', goldD: '#a9772a',
-  p0: '#1c8f74', p0D: '#0c5a47', p1: '#d64430', p1D: '#992517',
-  home0: 'rgba(28,143,116,0.18)', home1: 'rgba(214,68,48,0.16)'
-};
-
-// Orchestrate local mock or evaluate directly
-const OCTI = eval(CORE_SRC + "\nglobalThis.OCTI;");
-
-class GameTracker {
-  constructor() { this.games = []; this.currentGame = null; this.load(); }
-  load() { try { const d = localStorage.getItem('octi_tracker'); if(d){ this.games = JSON.parse(d); this.updateCount(); } }catch(e){} }
-  save() { try { localStorage.setItem('octi_tracker', JSON.stringify(this.games)); this.updateCount(); }catch(e){} }
-  updateCount() { document.getElementById('gameCount').textContent = `(${this.games.length})`; document.getElementById('exportBtn').disabled = this.games.length === 0; }
-  startNewGame(diff, humanP) { this.currentGame = { gameNum: this.games.length + 1, difficulty: diff, humanPlayer: humanP, result: 'unfinished', totalMoves: 0, moves: [], aiDecisions: [] }; }
-  recordAIDecision(stateBefore, chosenMove, top5, searchDepth) {
-    if (!this.currentGame || !chosenMove) return;
-    const top5Clean = top5.slice(0, 5).map(o => ({ type: o.move.type, from: o.move.from, dir: o.move.dir, score: Math.round(o.v) }));
-    const entry = { turn: this.currentGame.totalMoves++, by: 'ai', type: chosenMove.type, from: chosenMove.from, to: chosenMove.to != null ? chosenMove.to : null, dir: chosenMove.dir != null ? chosenMove.dir : null, board: this._encodeBoard(stateBefore.board), reserve: [...stateBefore.reserve], chosenScore: top5Clean.length > 0 ? top5Clean.find(o => o.from === chosenMove.from) : null, top5: top5Clean, depth: searchDepth };
-    this.currentGame.moves.push(entry); this.currentGame.aiDecisions.push(entry);
-  }
-  recordResult(winner, humanP) {
-    if (!this.currentGame) return;
-    this.currentGame.result = winner === humanP ? 'human_win' : 'ai_win'; this.currentGame.finalMoveCount = this.currentGame.totalMoves;
-    if (this.currentGame.result === 'human_win') {
-      const aiMoves = this.currentGame.aiDecisions;
-      for (let i = Math.max(0, aiMoves.length - 3); i < aiMoves.length; i++) { aiMoves[i].beforeHumanWin = true; }
-    }
-    this.games.push(this.currentGame); this.currentGame = null; this.save();
-  }
-  _encodeBoard(board) { return board.map((c, i) => c ? `${c.player}:${c.prongs}@${i}` : null).filter(Boolean).join(','); }
-  export() {
-    const dataStr = JSON.stringify(this.games, null, 2);
-    navigator.clipboard.writeText(dataStr).then(() => { alert('נתוני המשחקים הועתקו ללוח בהצלחה!'); }).catch(() => { alert('שגיאה בהעתקה.'); });
-  }
+let game, history, selected, anim, thinking;
+let difficulty='medium', humanPlayer=0, aiPlayer=1, busy=false;
+let gameLog=null, allLogs=[];
+function updateLogDisplay(){
+  document.getElementById('logLabel').textContent='נתוני '+allLogs.length+' משחקים לניתוח';
+  document.getElementById('logOut').value=JSON.stringify(allLogs);
+  document.getElementById('logWrap').style.display='block';
 }
-const tracker = new GameTracker();
+function encodeBoard(s){
+  let r=s.reserve[0]+','+s.reserve[1]+':';
+  for(const c of s.board) r+=c?c.player+c.prongs.toString(16).padStart(2,'0'):'.';
+  return r;
+}
+function encodeMove(m){
+  if(m.type==='add') return {t:'a',f:m.from,d:m.dir};
+  if(m.type==='move') return {t:'m',f:m.from,o:m.to};
+  return {t:'j',f:m.from,o:m.to,c:m.jumped};
+}
 
-function resizeCanvas(){
-  const containerW = document.querySelector('.stage').clientWidth;
-  const cssW = Math.min(containerW, 470);
-  const DPR = Math.min(window.devicePixelRatio||1, 2.5);
+function layout(){
+  const cssW = cv.clientWidth;
+  const cssH = cssW * (H+ /*frame*/0) / W; // keep cell square; height from ratio
+  // we want square cells: total inner = W*cell ; frame around. compute cell from width.
+  DPR = Math.min(window.devicePixelRatio||1, 2.5);
   const frameCss = Math.round(cssW*0.032);
   const innerW = cssW - frameCss*2;
   cell = innerW / W;
@@ -679,211 +470,335 @@ function resizeCanvas(){
   ctx.setTransform(DPR,0,0,DPR,0,0);
   ox = frameCss; oy = frameCss; BW = frameCss;
 }
-
 function cellCenter(i){ return { x: ox + (cx(i)+0.5)*cell, y: oy + (cy(i)+0.5)*cell }; }
 function dirUnit(d){ const v=DIRS[d]; const L=Math.hypot(v[0],v[1]); return {x:v[0]/L, y:v[1]/L}; }
+
 function octPath(p, cxp, cyp, r){
   p.beginPath();
-  for(let k=0;k<8;k++){ const a = (-112.5 + 45*k) * Math.PI/180; const x = cxp + r*Math.cos(a), y = cyp + r*Math.sin(a); k? p.lineTo(x,y) : p.moveTo(x,y); }
+  for(let k=0;k<8;k++){
+    const a = (-112.5 + 45*k) * Math.PI/180;
+    const x = cxp + r*Math.cos(a), y = cyp + r*Math.sin(a);
+    k? p.lineTo(x,y) : p.moveTo(x,y);
+  }
   p.closePath();
 }
 function drawProng(cxp,cyp,r,d,colorMain,colorEdge,scale){
-  const u=dirUnit(d); scale=scale==null?1:scale; const baseR=r*0.86, len=r*0.55*scale, halfW=r*0.20;
-  const bx=cxp+u.x*baseR, by=cyp+u.y*baseR; const tx=cxp+u.x*(baseR+len), ty=cyp+u.y*(baseR+len);
-  const px=-u.y, py=u.x;
-  ctx.beginPath(); ctx.moveTo(bx+px*halfW, by+py*halfW); ctx.lineTo(bx-px*halfW, by-py*halfW); ctx.lineTo(tx-px*halfW*0.5, ty-py*halfW*0.5); ctx.lineTo(tx+px*halfW*0.5, ty+py*halfW*0.5); ctx.closePath();
-  ctx.fillStyle=colorMain; ctx.fill(); ctx.lineWidth=Math.max(1,r*0.05); ctx.strokeStyle=colorEdge; ctx.stroke();
+  const u=dirUnit(d); scale=scale==null?1:scale;
+  const baseR=r*0.86, len=r*0.55*scale, halfW=r*0.20;
+  const bx=cxp+u.x*baseR, by=cyp+u.y*baseR;
+  const tx=cxp+u.x*(baseR+len), ty=cyp+u.y*(baseR+len);
+  const px=-u.y, py=u.x; // perpendicular
+  ctx.beginPath();
+  ctx.moveTo(bx+px*halfW, by+py*halfW);
+  ctx.lineTo(bx-px*halfW, by-py*halfW);
+  ctx.lineTo(tx-px*halfW*0.5, ty-py*halfW*0.5);
+  ctx.lineTo(tx+px*halfW*0.5, ty+py*halfW*0.5);
+  ctx.closePath();
+  ctx.fillStyle=colorMain; ctx.fill();
+  ctx.lineWidth=Math.max(1,r*0.05); ctx.strokeStyle=colorEdge; ctx.stroke();
+  // peg tip
   ctx.beginPath(); ctx.arc(tx,ty,halfW*0.55,0,7); ctx.fillStyle=colorMain; ctx.fill(); ctx.strokeStyle=colorEdge; ctx.stroke();
 }
 function drawPod(cxp,cyp,player,prongs,opts){
-  opts=opts||{}; const r=cell*0.37*(opts.scale||1); const C = player===0?COL.p0:COL.p1;
-  for(let d=0; d<8; d++) if(prongs & (1<<d)) drawProng(cxp,cyp,r,d,COL.gold,COL.goldD, 1);
-  ctx.shadowColor='rgba(0,0,0,0.25)'; ctx.shadowBlur=cell*0.08; ctx.shadowOffsetY=cell*0.04;
-  octPath(ctx, cxp, cyp, r); ctx.fillStyle = C; ctx.fill(); ctx.shadowBlur=0; ctx.shadowOffsetY=0;
-  ctx.lineWidth=Math.max(1.5, cell*0.035); ctx.strokeStyle = player===0?COL.p0D:COL.p1D; ctx.stroke();
-  octPath(ctx, cxp, cyp, r*0.72); ctx.fillStyle='rgba(255,255,255,0.08)'; ctx.fill(); ctx.lineWidth=Math.max(1,cell*0.02); ctx.strokeStyle='rgba(255,255,255,0.15)'; ctx.stroke();
-  if(opts.selected){ ctx.beginPath(); ctx.arc(cxp,cyp,r*1.18,0,7); ctx.lineWidth=2.5; ctx.strokeStyle='#fff'; ctx.stroke(); }
+  opts=opts||{};
+  const r=cell*0.37*(opts.scale||1);
+  const C = player===0?COL.p0:COL.p1;
+  // prongs (behind/around)
+  for(let d=0; d<8; d++) if(prongs & (1<<d)) drawProng(cxp,cyp,r,d,COL.gold,COL.goldD, opts.prongScale);
+  // body
+  ctx.save();
+  if(opts.alpha!=null) ctx.globalAlpha=opts.alpha;
+  octPath(ctx,cxp,cyp,r);
+  const g=ctx.createRadialGradient(cxp-r*0.35,cyp-r*0.4,r*0.2, cxp,cyp,r*1.05);
+  g.addColorStop(0,C[0]); g.addColorStop(0.6,C[1]); g.addColorStop(1,C[2]);
+  ctx.fillStyle=g; ctx.fill();
+  ctx.lineWidth=Math.max(1.4,r*0.09); ctx.strokeStyle=C[2]; ctx.stroke();
+  // inner ring
+  octPath(ctx,cxp,cyp,r*0.62);
+  ctx.lineWidth=Math.max(1,r*0.05); ctx.strokeStyle='rgba(255,255,255,.18)'; ctx.stroke();
+  ctx.restore();
 }
 
+function legalForSelected(){
+  if(selected==null) return [];
+  return genMoves(game).filter(m=>m.from===selected);
+}
 function targetMap(){
-  const res = new Map(); if(selected==null) return res;
-  const ms = OCTI.genMoves(game);
-  for(const m of ms) if(m.from===selected && (m.type==='move'||m.type==='jump')) res.set(m.to, m);
-  return res;
+  // cell -> chosen move (prefer jump w/ most captures)
+  const map=new Map();
+  for(const m of legalForSelected()){
+    if(m.type==='add') continue;
+    const prev=map.get(m.to);
+    if(!prev){ map.set(m.to,m); continue; }
+    const capN=mm=>mm.type==='jump'?mm.jumped.filter(mi=>game.board[mi]&&game.board[mi].player!==game.toMove).length:0;
+    if(capN(m)>capN(prev)) map.set(m.to,m);
+  }
+  return map;
 }
 
 function render(){
-  const fullW = cv.width / (window.devicePixelRatio||1);
-  const fullH = cv.height / (window.devicePixelRatio||1);
-  ctx.fillStyle = COL.bg; ctx.fillRect(0,0,fullW,fullH);
-  ctx.fillStyle = COL.frame1; roundRect(0,0,fullW,fullH,10); ctx.fill();
-  ctx.fillStyle = COL.frame2; roundRect(BW-1,BW-1,fullW-BW*2+2,fullH-BW*2+2,4); ctx.fill();
-  
-  for(let y=0; y<H; y++){
-    for(let x=0; x<W; x++){
-      const i=idx(x,y); ctx.fillStyle = (x+y)%2===0 ? COL.board : COL.board2;
-      ctx.fillRect(ox+x*cell, oy+y*cell, cell, cell);
-      if(y===1 && x>=1 && x<=4){ ctx.fillStyle = COL.home1; ctx.fillRect(ox+x*cell, oy+y*cell, cell, cell); }
-      if(y===5 && x>=1 && x<=4){ ctx.fillStyle = COL.home0; ctx.fillRect(ox+x*cell, oy+y*cell, cell, cell); }
-      const pod = game.board[i];
-      if(pod && (!anim || (anim.move.from!==i && anim.move.to!==i))) { drawPod(ox+(x+0.5)*cell, oy+(y+0.5)*cell, pod.player, pod.prongs, {selected:i===selected}); }
+  const w=cv.clientWidth, h=parseFloat(cv.style.height);
+  ctx.clearRect(0,0,w,h);
+  // wooden frame
+  const fg=ctx.createLinearGradient(0,0,w,h);
+  fg.addColorStop(0,COL.frame1); fg.addColorStop(1,COL.frame2);
+  roundRect(0,0,w,h,10); ctx.fillStyle=fg; ctx.fill();
+  // board face
+  const bx=ox, by=oy, bw=cell*W, bh=cell*H;
+  const bg=ctx.createLinearGradient(bx,by,bx,by+bh);
+  bg.addColorStop(0,COL.board); bg.addColorStop(1,COL.board2);
+  ctx.fillStyle=bg; ctx.fillRect(bx,by,bw,bh);
+  // home tints
+  for(let p=0;p<2;p++){
+    ctx.fillStyle = p===0 ? 'rgba(28,143,116,.26)' : 'rgba(214,68,48,.24)';
+    for(const i of HOME[p]){ const x=ox+cx(i)*cell, y=oy+cy(i)*cell; ctx.fillRect(x,y,cell,cell); }
+  }
+  // grid
+  ctx.strokeStyle=COL.grid; ctx.lineWidth=1;
+  for(let c=0;c<=W;c++){ const x=Math.round(ox+c*cell)+.5; ctx.beginPath(); ctx.moveTo(x,by); ctx.lineTo(x,by+bh); ctx.stroke(); }
+  for(let r=0;r<=H;r++){ const y=Math.round(oy+r*cell)+.5; ctx.beginPath(); ctx.moveTo(bx,y); ctx.lineTo(bx+bw,y); ctx.stroke(); }
+  // board inner shadow edge
+  ctx.strokeStyle='rgba(0,0,0,.18)'; ctx.lineWidth=2; ctx.strokeRect(bx+1,by+1,bw-2,bh-2);
+
+  const animTo = anim && (anim.type==='move'||anim.type==='jump') ? anim.move.to : -1;
+  const captured = anim && anim.captured ? anim.captured : [];
+
+  // pods (skip the one currently flying; fade captured)
+  for(let i=0;i<game.board.length;i++){
+    const pod=game.board[i]; if(!pod) continue;
+    if(i===animTo) continue;
+    const c=cellCenter(i);
+    let alpha=1, pscale=1;
+    if(captured.indexOf(i)!==-1 && anim){ alpha = 1-anim.p; }
+    if(anim && anim.type==='add' && i===anim.move.from){
+      // draw existing prongs full + the new one growing
+      drawPodWithGrowingProng(c.x,c.y,pod,anim.move.dir,anim.p);
+      continue;
     }
+    drawPod(c.x,c.y,pod.player,pod.prongs,{alpha});
   }
 
-  if(selected!=null && game.toMove===humanPlayer && game.reserve[humanPlayer]>0 && !anim){
-    const pod = game.board[selected], c = cellCenter(selected), r = cell*0.37;
-    ctx.save();
-    for(let d=0; d<8; d++) if(!(pod.prongs & (1<<d))){
-      const u=dirUnit(d); const tx=c.x+u.x*(r*0.86+r*0.5), ty=c.y+u.y*(r*0.86+r*0.5);
-      ctx.beginPath(); ctx.arc(tx,ty,cell*0.11,0,7); ctx.fillStyle='rgba(231,177,60,0.22)'; ctx.fill(); ctx.strokeStyle='rgba(231,177,60,0.55)'; ctx.lineWidth=1; ctx.stroke();
-      ctx.fillStyle='rgba(60,40,18,.85)'; ctx.font='bold '+(cell*0.18)+'px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('+', tx, ty);
+  // selection + hints (only when human's turn, not animating)
+  if(selected!=null && !anim && game.toMove===humanPlayer){
+    const c=cellCenter(selected);
+    // glow
+    ctx.save(); ctx.beginPath(); ctx.arc(c.x,c.y,cell*0.46,0,7);
+    ctx.strokeStyle='rgba(231,177,60,.9)'; ctx.lineWidth=3; ctx.shadowColor='rgba(231,177,60,.7)'; ctx.shadowBlur=12; ctx.stroke(); ctx.restore();
+    // ghost prongs for adds
+    if(game.reserve[humanPlayer]>0){
+      const pod=game.board[selected];
+      for(let d=0;d<8;d++) if(!(pod.prongs&(1<<d))){
+        const u=dirUnit(d), r=cell*0.37;
+        const tx=c.x+u.x*(r*0.86+r*0.5), ty=c.y+u.y*(r*0.86+r*0.5);
+        ctx.save(); ctx.globalAlpha=0.5; drawProng(c.x,c.y,r,d,'rgba(231,177,60,.55)','rgba(169,119,42,.7)',1); ctx.restore();
+        ctx.fillStyle='rgba(60,40,18,.85)'; ctx.font='bold '+(cell*0.18)+'px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillText('+', tx, ty);
+      }
     }
-    ctx.restore();
+    // move / jump targets
+    const tmap=targetMap();
+    tmap.forEach((m,i)=>{
+      const t=cellCenter(i);
+      if(m.type==='move'){
+        ctx.beginPath(); ctx.arc(t.x,t.y,cell*0.16,0,7); ctx.fillStyle='rgba(40,28,14,.4)'; ctx.fill();
+      } else {
+        const caps=m.jumped.filter(mi=>game.board[mi]&&game.board[mi].player!==game.toMove).length;
+        ctx.beginPath(); ctx.arc(t.x,t.y,cell*0.30,0,7);
+        ctx.lineWidth=3; ctx.strokeStyle= caps>0 ? 'rgba(214,68,48,.9)':'rgba(40,28,14,.55)'; ctx.stroke();
+        ctx.beginPath(); ctx.arc(t.x,t.y,cell*0.10,0,7); ctx.fillStyle=caps>0?'rgba(214,68,48,.8)':'rgba(40,28,14,.45)'; ctx.fill();
+      }
+    });
   }
 
-  const tmap = targetMap();
-  tmap.forEach((m,i)=>{
-    const t = cellCenter(i);
-    if(m.type==='move'){ ctx.beginPath(); ctx.arc(t.x,t.y,cell*0.16,0,7); ctx.fillStyle='rgba(40,28,14,.4)'; ctx.fill(); }
-    else {
-      const caps = m.jumped.filter(mi=>game.board[mi]&&game.board[mi].player!==game.toMove).length;
-      ctx.beginPath(); ctx.arc(t.x,t.y,cell*0.30,0,7); ctx.lineWidth=3; ctx.strokeStyle= caps>0 ? 'rgba(214,68,48,.9)':'rgba(40,28,14,.55)'; ctx.stroke();
-      ctx.beginPath(); ctx.arc(t.x,t.y,cell*0.10,0,7); ctx.fillStyle=caps>0?'rgba(214,68,48,.8)':'rgba(40,28,14,.45)'; ctx.fill();
-    }
-  });
-
+  // flying pod
   if(anim && (anim.type==='move'||anim.type==='jump')){
-    const pos = animPos(); const pod = game.board[anim.move.to]; let lift=0;
-    if(anim.type==='jump') lift = -Math.sin(anim.p*Math.PI)*cell*0.22;
-    drawPod(pos.x, pos.y+lift, pod.player, pod.prongs, {scale:1+(anim.type==='jump'?0.06*Math.sin(anim.p*Math.PI):0)});
+    const pos=animPos(); const pod=game.board[anim.move.to];
+    let lift=0;
+    if(anim.type==='jump'){ lift = -Math.sin(anim.p*Math.PI)*cell*0.22; }
+    drawPod(pos.x, pos.y+lift, pod.player, pod.prongs, {scale:1+ (anim.type==='jump'?0.06*Math.sin(anim.p*Math.PI):0)});
   }
 }
+function drawPodWithGrowingProng(x,y,pod,dir,t){
+  // body
+  drawPod(x,y,pod.player,pod.prongs & ~(1<<dir),{});
+  const r=cell*0.37;
+  drawProng(x,y,r,dir,COL.gold,COL.goldD, t);
+}
+function roundRect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
 
-function drawPodWithGrowingProng(x,y,pod,dir,t){ drawPod(x,y,pod.player,pod.prongs & ~(1<<dir),{}); const r=cell*0.37; drawProng(x,y,r,dir,COL.gold,COL.goldD, t); }
-function roundRect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
-
+/* ---- animation ---- */
+function animPath(pre, m){
+  const pts=[m.from];
+  if(m.type==='jump'){
+    let cur=m.from;
+    for(const mi of m.jumped){ const land=idx(2*cx(mi)-cx(cur), 2*cy(mi)-cy(cur)); pts.push(land); cur=land; }
+  } else pts.push(m.to);
+  return pts.map(cellCenter);
+}
 function animPos(){
-  const p0 = cellCenter(anim.move.from), p1 = cellCenter(anim.move.to);
-  return { x: p0.x + (p1.x-p0.x)*anim.p, y: p0.y + (p1.y-p0.y)*anim.p };
+  const segs=anim.pts.length-1; const tt=anim.p*segs; const s=Math.min(segs-1, tt|0); const f=tt-s;
+  const a=anim.pts[s], b=anim.pts[s+1];
+  return { x:a.x+(b.x-a.x)*f, y:a.y+(b.y-a.y)*f };
+}
+function startAnim(pre, m, after){
+  const mover=pre.toMove;
+  const captured = m.type==='jump' ? m.jumped.filter(mi=>pre.board[mi]&&pre.board[mi].player!==mover) : [];
+  anim = { type:m.type, move:m, p:0, t0:performance.now(),
+           dur: m.type==='add'?150 : (m.type==='jump'? 240+ (m.jumped.length*120) : 300),
+           pts: (m.type!=='add')?animPath(pre,m):null, captured, after };
+  requestAnimationFrame(stepAnim);
+}
+function stepAnim(now){
+  const e=Math.min(1,(now-anim.t0)/anim.dur);
+  anim.p = e<0.5 ? 2*e*e : 1-Math.pow(-2*e+2,2)/2; // easeInOutQuad
+  render();
+  if(e<1){ requestAnimationFrame(stepAnim); }
+  else { const cb=anim.after; anim=null; render(); cb&&cb(); }
 }
 
-function execute(m, isHuman){
-  const stateBefore = OCTI.cloneState(game);
-  game = OCTI.applyMove(game, m); selected = null;
-  const c0 = cellCenter(m.from);
-  if(m.type==='add'){
-    anim = { type:'add', move:m, start:Date.now(), dur:220, p:0 };
-    const step = () => {
-      let elapsed = Date.now() - anim.start; let t = Math.min(elapsed/anim.dur, 1);
-      render(); drawPodWithGrowingProng(c0.x, c0.y, game.board[m.from], m.dir, t);
-      if(t<1){ requestAnimationFrame(step); } else { anim=null; finishExecute(isHuman); }
-    }; requestAnimationFrame(step);
-  } else {
-    anim = { type:m.type, move:m, start:Date.now(), dur:m.type==='jump'?320:220, p:0 };
-    const step = () => {
-      let elapsed = Date.now() - anim.start; anim.p = Math.min(elapsed/anim.dur, 1); render();
-      if(anim.p<1){ requestAnimationFrame(step); } else { anim=null; finishExecute(isHuman); }
-    }; requestAnimationFrame(step);
+/* ---- flow ---- */
+function newGame(){
+  game=initState(); game.toMove=(humanPlayer===0)?0:0;
+  history=[]; selected=null; anim=null; busy=false;
+  gameLog={d:difficulty,h:humanPlayer,moves:[],snaps:{'0':encodeBoard(game)}};
+  document.getElementById('overlay').classList.remove('show');
+  updateStatus(); render();
+  if(game.toMove===aiPlayer) aiTurn();
+}
+function updateStatus(){
+  document.getElementById('res0').textContent=game.reserve[humanPlayer];
+  document.getElementById('res1').textContent=game.reserve[aiPlayer];
+  const dot=document.getElementById('turnDot'), txt=document.getElementById('turnTxt');
+  if(game.winner!=null){ return; }
+  const human = game.toMove===humanPlayer;
+  dot.style.background = (game.toMove===0?COL.p0[1]:COL.p1[1]);
+  txt.textContent = human ? 'תורך' : 'תור היריב…';
+  document.getElementById('undoBtn').disabled = history.length<1 || busy;
+}
+function execute(m){
+  if(gameLog){
+    gameLog.moves.push({by:game.toMove===humanPlayer?'h':'a',...encodeMove(m)});
+    const n=gameLog.moves.length;
+    if(n%6===0) gameLog.snaps[n]=encodeBoard(game);
+  }
+  const pre=game;
+  game=applyMove(pre,m);
+  startAnim(pre,m,()=>{ postMove(); });
+}
+function postMove(){
+  updateStatus(); render();
+  if(game.winner!=null){ showWin(); return; }
+  if(genMoves(game).length===0){ // stuck = loss for side to move
+    game.winner = 1-game.toMove; showWin(); return;
+  }
+  if(game.toMove===aiPlayer) aiTurn();
+  else { busy=false; updateStatus(); }
+}
+function aiTurn(){
+  busy=true; selected=null; updateStatus();
+  document.getElementById('thinking').textContent='היריב חושב…';
+  const t0=performance.now();
+  history.push(cloneState(game));
+  aiWorker.onmessage=(e)=>{
+    const m=e.data.move;
+    const wait=Math.max(0, 80 - (performance.now()-t0));
+    setTimeout(()=>{ document.getElementById('thinking').textContent=''; if(m) execute(m); else { game.winner=humanPlayer; showWin(); } }, wait);
+  };
+  aiWorker.postMessage({state:game, difficulty});
+}
+function showWin(){
+  const ov=document.getElementById('overlay');
+  const won = game.winner===humanPlayer;
+  document.getElementById('winBig').textContent = won ? 'ניצחת! 🎉' : 'היריב ניצח';
+  document.getElementById('winBig').style.color = won? COL.p0[0] : COL.p1[0];
+  document.getElementById('winSub').textContent = won ? 'הגעת למשבצת בית של היריב' : 'נסה שוב — אפשר לשנות רמת קושי';
+  document.getElementById('turnTxt').textContent = won?'ניצחת':'הפסדת';
+  ov.classList.add('show'); busy=true;
+  document.getElementById('undoBtn').disabled=true;
+  if(gameLog){
+    gameLog.result=won?'human':'ai';
+    gameLog.snaps['f']=encodeBoard(game);
+    allLogs.push(gameLog);
+    updateLogDisplay();
   }
 }
 
-function finishExecute(isHuman){
-  updateStatusUI();
-  if(game.winner!=null){ endGame(game.winner); return; }
-  if(game.toMove!==humanPlayer){ triggerAI(); }
+/* ---- input ---- */
+function canvasPoint(ev){
+  const r=cv.getBoundingClientRect();
+  const e = ev.touches? ev.touches[0] : ev;
+  return { x:(e.clientX-r.left), y:(e.clientY-r.top) };
 }
-
-function triggerAI(){
-  busy = true; updateStatusUI();
-  document.getElementById('thinking').textContent = 'המחשב חושב ומנתח מהלכים...';
-  
-  // Create an asynchronous background worker cleanly from core source to prevent UI stutter
-  const blob = new Blob([CORE_SRC], {type: 'application/javascript'});
-  const worker = new Worker(URL.createObjectURL(blob));
-  
-  worker.postMessage({ s: game, difficulty });
-  worker.onmessage = function(e){
-    const { move, scored, depth } = e.data;
-    tracker.recordAIDecision(game, move, scored, depth);
-    document.getElementById('thinking').textContent = `נותחו מהלכים לעומק ${depth} פליי.`;
-    busy = false; worker.terminate();
-    if(move) execute(move, false);
-  };
+function cellAt(px,py){
+  const x=Math.floor((px-ox)/cell), y=Math.floor((py-oy)/cell);
+  if(x<0||x>=W||y<0||y>=H) return -1; return idx(x,y);
 }
-
-function updateStatusUI(){
-  const myTurn = game.toMove === humanPlayer;
-  document.getElementById('undoBtn').disabled = history.length===0 || busy || game.winner!=null;
-  document.getElementById('turnDot').style.backgroundColor = game.toMove===0?COL.p0:COL.p1;
-  document.getElementById('turnTxt').textContent = busy ? 'חשיבה...' : (myTurn ? 'תורך' : 'תור המחשב');
-  document.getElementById('res0').textContent = game.reserve[humanPlayer];
-  document.getElementById('res1').textContent = game.reserve[1-humanPlayer];
-}
-
-function endGame(winner){
-  tracker.recordResult(winner, humanPlayer);
-  const won = winner === humanPlayer;
-  document.getElementById('winBig').textContent = won ? 'כל הכבוד! ניצחת!' : 'הפסדת הפעם...';
-  document.getElementById('winSub').textContent = won ? 'הצלחת להנחית כלי ביעד או ללכוד את כלי היריב' : 'המחשב הצליח להערים עליך. אפשר לשנות רמת קושי';
-  document.getElementById('turnTxt').textContent = won?'ניצחת':'הפסדת';
-  ov.classList.add('show'); busy = true; document.getElementById('undoBtn').disabled=true;
-}
-
-function canvasPoint(ev){ const r=cv.getBoundingClientRect(); const e = ev.touches? ev.touches[0] : ev; return { x:(e.clientX-r.left), y:(e.clientY-r.top) }; }
-function cellAt(px,py){ const x=Math.floor((px-ox)/cell), y=Math.floor((py-oy)/cell); if(x<0||x>=W||y<0||y>=H) return -1; return idx(x,y); }
-
 function onTap(ev){
   if(busy||anim||game.winner!=null||game.toMove!==humanPlayer) return;
-  ev.preventDefault(); const pt = canvasPoint(ev);
+  ev.preventDefault();
+  const pt=canvasPoint(ev);
+  // 1) if a pod is selected, check ghost-prong taps first
   if(selected!=null && game.reserve[humanPlayer]>0){
-    const pod = game.board[selected], c = cellCenter(selected), r = cell*0.37;
+    const pod=game.board[selected], c=cellCenter(selected), r=cell*0.37;
     for(let d=0;d<8;d++) if(!(pod.prongs&(1<<d))){
       const u=dirUnit(d); const tx=c.x+u.x*(r*0.86+r*0.5), ty=c.y+u.y*(r*0.86+r*0.5);
-      if(Math.hypot(pt.x-tx,pt.y-ty) < cell*0.26){ history.push(OCTI.cloneState(game)); execute({type:'add',from:selected,dir:d}, true); return; }
+      if(Math.hypot(pt.x-tx,pt.y-ty) < cell*0.26){
+        history.push(cloneState(game)); execute({type:'add',from:selected,dir:d}); return;
+      }
     }
   }
-  const i = cellAt(pt.x,pt.y); if(i<0){ selected=null; render(); return; }
+  const i=cellAt(pt.x,pt.y);
+  if(i<0){ selected=null; render(); return; }
+  // 2) target cell?
   if(selected!=null){
-    const tmap = targetMap();
-    if(tmap.has(i)){ history.push(OCTI.cloneState(game)); execute(tmap.get(i), true); return; }
+    const tmap=targetMap();
+    if(tmap.has(i)){ history.push(cloneState(game)); execute(tmap.get(i)); return; }
   }
-  const pod = game.board[i]; if(pod && pod.player===humanPlayer){ selected = i; } else { selected = null; }
-  render();
+  // 3) select own pod
+  const pod=game.board[i];
+  if(pod && pod.player===humanPlayer){ selected = (selected===i)? null : i; render(); return; }
+  // 4) elsewhere
+  selected=null; render();
+}
+cv.addEventListener('pointerdown', onTap);
+
+function undo(){
+  if(busy||anim||history.length<1) return;
+  // revert until it's the human's turn again (undo the AI reply + your move)
+  let target=null;
+  while(history.length){ const s=history.pop(); if(s.toMove===humanPlayer){ target=s; break; } target=s; }
+  if(target){ game=target; selected=null; document.getElementById('overlay').classList.remove('show');
+    busy=false; updateStatus(); render(); }
 }
 
-function startNewGame(){
-  const startVal = parseInt(document.querySelector('#startSeg button.on').dataset.start);
-  humanPlayer = startVal === 0 ? 0 : 1;
-  difficulty = document.querySelector('#diffSeg button.on').dataset.diff;
-  game = OCTI.initState(); history = []; selected = null; busy = false; anim = null;
-  ov.classList.remove('show'); document.getElementById('thinking').textContent = '';
-  tracker.startNewGame(difficulty, humanPlayer);
-  updateStatusUI(); render();
-  if(game.toMove !== humanPlayer) triggerAI();
-}
-
-// Event Bindings
-window.addEventListener('resize', () => { resizeCanvas(); render(); });
-cv.addEventListener('click', onTap); cv.addEventListener('touchstart', onTap, {passive:false});
-
-document.getElementById('newBtn').addEventListener('click', startNewGame);
-document.getElementById('againBtn').addEventListener('click', startNewGame);
-document.getElementById('exportBtn').addEventListener('click', () => tracker.export());
-
-document.getElementById('undoBtn').addEventListener('click', () => {
-  if(history.length===0 || busy || game.winner!=null) return;
-  game = history.pop(); selected = null; anim = null; updateStatusUI(); render();
+/* ---- controls ---- */
+document.getElementById('diffSeg').addEventListener('click',e=>{
+  const b=e.target.closest('button[data-diff]'); if(!b) return;
+  difficulty=b.dataset.diff;
+  [...e.currentTarget.querySelectorAll('button')].forEach(x=>x.classList.toggle('on',x===b));
+});
+document.getElementById('startSeg').addEventListener('click',e=>{
+  const b=e.target.closest('button[data-start]'); if(!b) return;
+  humanPlayer = b.dataset.start==='0'?0:1; aiPlayer=1-humanPlayer;
+  [...e.currentTarget.querySelectorAll('button')].forEach(x=>x.classList.toggle('on',x===b));
+  newGame();
+});
+document.getElementById('newBtn').addEventListener('click',newGame);
+document.getElementById('againBtn').addEventListener('click',newGame);
+document.getElementById('undoBtn').addEventListener('click',undo);
+document.getElementById('copyLogBtn').addEventListener('click',()=>{
+  navigator.clipboard.writeText(document.getElementById('logOut').value).catch(()=>{});
+  const b=document.getElementById('copyLogBtn');
+  b.textContent='הועתק ✓'; setTimeout(()=>b.textContent='העתק הכל',1500);
+});
+document.getElementById('clearLogBtn').addEventListener('click',()=>{
+  allLogs=[];
+  document.getElementById('logWrap').style.display='none';
 });
 
-document.querySelectorAll('.seg button').forEach(btn => {
-  btn.addEventListener('click', function(){
-    if(busy) return; this.parentNode.querySelectorAll('button').forEach(b=>b.classList.remove('on'));
-    this.classList.add('on');
-  });
-});
-
-// Init
-resizeCanvas(); game = OCTI.initState(); updateStatusUI(); render();
+window.addEventListener('resize',()=>{ layout(); render(); });
+layout(); newGame();
 </script>
 </body>
 </html>
