@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>אוקטי — OCTI</title>
+<style>
+  :root{
+    --frame1:#3c2c1d; --frame2:#23160c;
+    --board:#ece2c6; --board2:#e3d6b2;
+    --gold:#e7b13c; --gold-d:#a9772a;
+    --p0:#1c8f74; --p0-d:#0c5a47;
+    --p1:#d64430; --p1-d:#992517;
+    --ink:#f3ead6; --ink-dim:#bcae93;
+    --panel:#1b120a;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;height:100%;}
+  body{
+    background:
+      radial-gradient(120% 90% at 50% -10%, #2c1d10 0%, #150d06 60%, #0d0703 100%);
+    color:var(--ink);
+    font-family:"Heebo","Assistant",system-ui,-apple-system,"Segoe UI",Arial,sans-serif;
+    display:flex;flex-direction:column;align-items:center;
+    min-height:100%;padding:14px 12px 26px;gap:12px;
+  }
+  header{display:flex;flex-direction:column;align-items:center;gap:2px;margin-top:2px;}
+  .brand{display:flex;align-items:baseline;gap:10px;}
+  .brand h1{
+    margin:0;font-size:34px;font-weight:800;letter-spacing:.22em;
+    color:var(--p1);text-shadow:0 1px 0 #00000055; padding-right:.22em;
+  }
+  .brand .he{font-size:30px;font-weight:800;color:var(--ink);}
+  .tag{font-size:12px;letter-spacing:.32em;color:var(--ink-dim);text-transform:uppercase;}
+
+  .controls{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;max-width:560px;}
+  .seg{display:flex;background:#00000033;border:1px solid #ffffff14;border-radius:999px;padding:3px;gap:2px;}
+  .seg button{
+    border:0;background:transparent;color:var(--ink-dim);font:inherit;font-size:13px;font-weight:600;
+    padding:6px 13px;border-radius:999px;cursor:pointer;transition:.15s;
+  }
+  .seg button.on{background:linear-gradient(180deg,#5a4326,#3a2a18);color:#fff;box-shadow:0 1px 3px #0006;}
+  .seg .lbl{align-self:center;color:var(--ink-dim);font-size:12px;padding:0 8px 0 4px;font-weight:600;}
+  .btn{
+    border:1px solid #ffffff1f;background:#ffffff10;color:var(--ink);font:inherit;font-weight:600;font-size:13px;
+    padding:8px 15px;border-radius:999px;cursor:pointer;transition:.15s;
+  }
+  .btn:hover{background:#ffffff1c;}
+  .btn:active{transform:translateY(1px);}
+  .btn[disabled]{opacity:.4;cursor:default;}
+
+  .stage{position:relative;width:min(94vw,470px);}
+  canvas{width:100%;display:block;border-radius:10px;touch-action:manipulation;
+    box-shadow:0 18px 40px -16px #000, 0 0 0 1px #00000040;}
+  .status{
+    display:flex;align-items:center;justify-content:space-between;gap:10px;
+    width:min(94vw,470px);font-size:14px;
+  }
+  .turn{display:flex;align-items:center;gap:9px;font-weight:600;}
+  .dot{width:14px;height:14px;border-radius:50%;box-shadow:0 0 0 2px #0004 inset;}
+  .reserves{display:flex;gap:14px;color:var(--ink-dim);font-size:12.5px;font-weight:600;}
+  .reserves b{color:var(--ink);font-weight:700;}
+
+  .overlay{
+    position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+    background:#0a0603cc;border-radius:10px;backdrop-filter:blur(2px);
+  }
+  .overlay.show{display:flex;}
+  .card{text-align:center;padding:22px 26px;}
+  .card .big{font-size:26px;font-weight:800;margin-bottom:4px;}
+  .card .sub{color:var(--ink-dim);font-size:14px;margin-bottom:16px;}
+
+  details.rules{width:min(94vw,470px);background:#ffffff0a;border:1px solid #ffffff14;border-radius:10px;padding:0 14px;}
+  details.rules summary{cursor:pointer;padding:11px 2px;font-weight:600;font-size:13.5px;color:var(--ink);list-style:none;}
+  details.rules summary::-webkit-details-marker{display:none;}
+  details.rules summary::after{content:"›";float:left;transition:.2s;color:var(--ink-dim);}
+  details.rules[open] summary::after{transform:rotate(90deg);}
+  details.rules .body{font-size:13px;line-height:1.7;color:var(--ink-dim);padding:2px 2px 14px;}
+  details.rules .body b{color:var(--ink);}
+  .thinking{font-size:12px;color:var(--ink-dim);min-height:16px;}
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand"><h1>OCTI</h1><span class="he">אוקטי</span></div>
+    <div class="tag">לתפוס כיוון</div>
+  </header>
+
+  <div class="controls">
+    <div class="seg" id="diffSeg">
+      <span class="lbl">יריב</span>
+      <button data-diff="easy">קל</button>
+      <button data-diff="medium" class="on">בינוני</button>
+      <button data-diff="hard">קשה</button>
+    </div>
+    <div class="seg" id="startSeg">
+      <span class="lbl">פותח</span>
+      <button data-start="0" class="on">אתה</button>
+      <button data-start="1">המחשב</button>
+    </div>
+  </div>
+  <div class="controls">
+    <button class="btn" id="newBtn">משחק חדש</button>
+    <button class="btn" id="undoBtn">ביטול מהלך</button>
+  </div>
+
+  <div class="status">
+    <div class="turn"><span class="dot" id="turnDot"></span><span id="turnTxt">תורך</span></div>
+    <div class="reserves">
+      <span>החיצים שלך <b id="res0">12</b></span>
+      <span>של היריב <b id="res1">12</b></span>
+    </div>
+  </div>
+
+  <div class="stage">
+    <canvas id="cv"></canvas>
+    <div class="overlay" id="overlay">
+      <div class="card">
+        <div class="big" id="winBig"></div>
+        <div class="sub" id="winSub"></div>
+        <button class="btn" id="againBtn">עוד משחק</button>
+      </div>
+    </div>
+  </div>
+  <div class="thinking" id="thinking"></div>
+
+  <details class="rules">
+    <summary>איך משחקים?</summary>
+    <div class="body">
+      המטרה: להנחית כלי שלך על אחת ממשבצות הבית של היריב (הצבועות, בקצה הרחוק).<br>
+      בכל תור עושים <b>פעולה אחת בלבד</b>:<br>
+      • <b>הוספת חץ</b> — בחר כלי, ולחץ על אחד מחצי־הרפאים סביבו. חץ קובע כיוון שאליו הכלי יכול לנוע.<br>
+      • <b>הזזה</b> — כלי זז משבצת אחת לכיוון של חץ שיש לו, למשבצת ריקה.<br>
+      • <b>קפיצה</b> — כלי קופץ מעל כלי סמוך (בכל צבע) ונוחת מעברו. אפשר רצף קפיצות, ובסופו כל כלי אויב שקפצת מעליו <b>נלכד</b> — יורד מהלוח ואתה מקבל את החיצים שלו.<br>
+      בחר כלי כדי לראות את כל המהלכים החוקיים שלו.
+    </div>
+  </details>
+
+<script>
+/* =================== OCTI CORE (shared with the AI worker) =================== */
+const CORE_SRC = String.raw`
+globalThis.OCTI = (function(){
+const W = 6, H = 7;
+const DIRS = [[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,1],[-1,0],[-1,-1]];
+const idx = (x,y) => y*W + x;
+const cx  = i => i % W;
+const cy  = i => (i / W) | 0;
+const inB = (x,y) => x>=0 && x<W && y>=0 && y<H;
+function popcount(n){ let c=0; while(n){ n&=n-1; c++; } return c; }
+function homeCells(p){ const y = p===0 ? H-2 : 1; return [idx(1,y),idx(2,y),idx(3,y),idx(4,y)]; }
+const HOME = [homeCells(0), homeCells(1)];
+const HOME_SET = [new Set(HOME[0]), new Set(HOME[1])];
+function initState(){
+  const board = new Array(W*H).fill(null);
+  for(const i of HOME[0]) board[i] = {player:0, prongs:0};
+  for(const i of HOME[1]) board[i] = {player:1, prongs:0};
+  return { board, reserve:[12,12], toMove:0, winner:null };
+}
+function cloneState(s){
+  return { board: s.board.map(c => c ? {player:c.player, prongs:c.prongs} : null),
+    reserve:[s.reserve[0],s.reserve[1]], toMove:s.toMove, winner:s.winner };
+}
+function genJumps(board, start, prongs){
+  const work = board.slice(); work[start] = null;
+  const results = [];
+  function rec(pos, jumpedArr){
+    const x = cx(pos), y = cy(pos);
+    for(let d=0; d<8; d++){
+      if(!(prongs & (1<<d))) continue;
+      const dx=DIRS[d][0], dy=DIRS[d][1];
+      const mx=x+dx, my=y+dy, lx=x+2*dx, ly=y+2*dy;
+      if(!inB(lx,ly)) continue;
+      const mi=idx(mx,my), li=idx(lx,ly);
+      if(work[mi]===null) continue;
+      if(work[li]!==null) continue;
+      if(jumpedArr.indexOf(mi)!==-1) continue;
+      const nextArr = jumpedArr.concat(mi);
+      results.push({ to: li, jumped: nextArr });
+      rec(li, nextArr);
+    }
+  }
+  rec(start, []);
+  return results;
+}
+function genMoves(s){
+  const p = s.toMove, b = s.board, moves = [];
+  for(let i=0;i<b.length;i++){
+    const pod = b[i];
+    if(!pod || pod.player!==p) continue;
+    const x=cx(i), y=cy(i);
+    for(let d=0; d<8; d++){
+      if(!(pod.prongs & (1<<d))) continue;
+      const nx=x+DIRS[d][0], ny=y+DIRS[d][1];
+      if(!inB(nx,ny)) continue;
+      const ni=idx(nx,ny);
+      if(b[ni]===null) moves.push({type:'move', from:i, to:ni, dir:d});
+    }
+    if(pod.prongs){
+      const js = genJumps(b, i, pod.prongs);
+      for(const j of js) moves.push({type:'jump', from:i, to:j.to, jumped:j.jumped});
+    }
+    if(s.reserve[p] > 0){
+      for(let d=0; d<8; d++) if(!(pod.prongs & (1<<d))) moves.push({type:'add', from:i, dir:d});
+    }
+  }
+  return moves;
+}
+function applyMove(s, m){
+  const ns = cloneState(s); const b = ns.board, p = ns.toMove;
+  if(m.type==='add'){ b[m.from].prongs |= (1<<m.dir); ns.reserve[p] -= 1; }
+  else if(m.type==='move'){ b[m.to] = b[m.from]; b[m.from] = null; }
+  else if(m.type==='jump'){
+    const pod = b[m.from]; b[m.from] = null;
+    for(const mi of m.jumped){ const t=b[mi]; if(t && t.player!==p){ ns.reserve[p]+=popcount(t.prongs); b[mi]=null; } }
+    b[m.to] = pod;
+  }
+  if((m.type==='move'||m.type==='jump') && HOME_SET[1-p].has(m.to)) ns.winner = p;
+  ns.toMove = 1 - p;
+  return ns;
+}
+/* ---- AI ---- */
+const WIN_SCORE = 1e7;
+// Zobrist table: 42 cells * 2 players * 256 prong combos + reserves + turn
+const ZR=(function(){
+  const t=new Int32Array(42*512+28);
+  let s=0x9E3779B9|0;
+  for(let i=0;i<t.length;i++){s=Math.imul(s^(s>>>16),0x45d9f3b|0);s^=s>>>16;t[i]=s;}
+  return t;
+})();
+// Transposition table: 512k slots
+const TT_SIZE=1<<19;
+const tt_key=new Int32Array(TT_SIZE);
+const tt_dep=new Int8Array(TT_SIZE);
+const tt_scr=new Int32Array(TT_SIZE);
+const tt_flg=new Uint8Array(TT_SIZE); // 0=exact,1=lower,2=upper
+function zhash(s){
+  let h=s.toMove?ZR[ZR.length-1]:0;
+  for(let i=0;i<s.board.length;i++){
+    const pod=s.board[i];
+    if(pod)h^=ZR[i*512+pod.player*256+pod.prongs];
+  }
+  h^=ZR[42*512+s.reserve[0]];
+  h^=ZR[42*512+13+s.reserve[1]];
+  return h;
+}
+function chebToHome(i, home){
+  const x=cx(i), y=cy(i); let best=99;
+  for(const h of home){ const d=Math.max(Math.abs(x-cx(h)),Math.abs(y-cy(h))); if(d<best)best=d; }
+  return best;
+}
+function evaluate(s){
+  if(s.winner!==null) return s.winner===s.toMove ? WIN_SCORE : -WIN_SCORE;
+  const p=s.toMove, q=1-p, b=s.board;
+  let score=0, myPods=0, opPods=0;
+  let myMinTTW=99, opMinTTW=99, myThreats=0, opThreats=0;
+  for(let i=0;i<b.length;i++){
+    const pod=b[i]; if(!pod) continue;
+    const isMe=pod.player===p;
+    let fwd=0, lat=0;
+    for(let d=0;d<8;d++){
+      if(!(pod.prongs&(1<<d))) continue;
+      const dy=DIRS[d][1], up=(isMe?p:q)===0;
+      if(up?dy<0:dy>0) fwd++; else if(dy===0) lat++;
+    }
+    const total=popcount(pod.prongs), pv=fwd*3+lat;
+    if(isMe){
+      myPods++; score+=pv*8;
+      if(total>0){
+        const d=chebToHome(i,HOME[q]); score+=(7-d)*12;
+        const ttw=fwd>0?d:(s.reserve[p]>0?d+1:99);
+        if(ttw<myMinTTW)myMinTTW=ttw; if(ttw<=3)myThreats++;
+      } else if(s.reserve[p]>0){
+        const ttw=chebToHome(i,HOME[q])+1;
+        if(ttw<myMinTTW)myMinTTW=ttw;
+      }
+    } else {
+      opPods++; score-=pv*8;
+      if(total>0){
+        const d=chebToHome(i,HOME[p]); score-=(7-d)*12;
+        const ttw=fwd>0?d:(s.reserve[q]>0?d+1:99);
+        if(ttw<opMinTTW)opMinTTW=ttw; if(ttw<=3)opThreats++;
+      } else if(s.reserve[q]>0){
+        const ttw=chebToHome(i,HOME[p])+1;
+        if(ttw<opMinTTW)opMinTTW=ttw;
+      }
+    }
+  }
+  score+=7*(s.reserve[p]-s.reserve[q]);
+  score+=70*(myPods-opPods);
+  score+=45*(myThreats-opThreats);
+  // Race: turns-to-win gap is the dominant strategic factor
+  if(myMinTTW<99&&opMinTTW<99) score+=180*(opMinTTW-myMinTTW);
+  else if(myMinTTW<99) score+=180*(7-myMinTTW);
+  else if(opMinTTW<99) score-=180*(7-opMinTTW);
+  if(myMinTTW<=1) score+=600; if(opMinTTW<=1) score-=650;
+  if(myMinTTW<=2) score+=250; if(opMinTTW<=2) score-=270;
+  return score;
+}
+function moveOrderKey(s, m){
+  const p=s.toMove;
+  if((m.type==='move'||m.type==='jump')&&HOME_SET[1-p].has(m.to)) return 3000;
+  if(m.type==='jump'){
+    let cap=0; for(const mi of m.jumped){const t=s.board[mi];if(t&&t.player!==p)cap++;}
+    return 1000+cap*150+m.jumped.length*20;
+  }
+  if(m.type==='move'){
+    const d0=chebToHome(m.from,HOME[1-p]),d1=chebToHome(m.to,HOME[1-p]);
+    return 300+(d0-d1)*80;
+  }
+  const dy=DIRS[m.dir][1],up=p===0;
+  return (up?dy<0:dy>0)?100:25;
+}
+let _nc=0;
+function negamax(s, depth, alpha, beta, deadline, allowNull){
+  if(depth===0) return evaluate(s);
+  if(!(++_nc&1023)&&Date.now()>deadline) return evaluate(s);
+  const h=zhash(s), slot=(h>>>0)&(TT_SIZE-1), origAlpha=alpha;
+  if(tt_key[slot]===h&&tt_dep[slot]>=depth){
+    const f=tt_flg[slot],sc=tt_scr[slot];
+    if(f===0) return sc;
+    if(f===1){if(sc>alpha)alpha=sc;}else{if(sc<beta)beta=sc;}
+    if(alpha>=beta) return sc;
+  }
+  // Null move pruning: skip our turn — if still winning, prune this entire branch
+  if(allowNull&&depth>=4&&beta<WIN_SCORE/2){
+    const R=depth>=6?3:2;
+    const ns={board:s.board,reserve:s.reserve,toMove:1-s.toMove,winner:null};
+    if(-negamax(ns,depth-1-R,-beta,-beta+1,deadline,false)>=beta) return beta;
+  }
+  let moves=genMoves(s);
+  if(moves.length===0) return -WIN_SCORE-depth;
+  moves.sort((a,b)=>moveOrderKey(s,b)-moveOrderKey(s,a));
+  let best=-Infinity;
+  for(const m of moves){
+    const ns=applyMove(s,m);
+    const val=(ns.winner===s.toMove)?(WIN_SCORE+depth):-negamax(ns,depth-1,-beta,-alpha,deadline,true);
+    if(val>best)best=val;
+    if(best>alpha)alpha=best;
+    if(alpha>=beta)break;
+  }
+  tt_key[slot]=h; tt_dep[slot]=depth; tt_scr[slot]=best;
+  tt_flg[slot]=best<=origAlpha?2:best>=beta?1:0;
+  return best;
+}
+function bestAtDepth(s, moves, depth, deadline){
+  moves=moves.slice().sort((a,b)=>moveOrderKey(s,b)-moveOrderKey(s,a));
+  let best=-Infinity,bestMove=moves[0],alpha=-Infinity; const scored=[];
+  for(const m of moves){
+    const ns=applyMove(s,m);
+    const val=(ns.winner===s.toMove)?(WIN_SCORE+depth):-negamax(ns,depth-1,-Infinity,-alpha,deadline,true);
+    scored.push({move:m,v:val});
+    if(val>best){best=val;bestMove=m;}
+    if(best>alpha)alpha=best;
+    if(Date.now()>deadline)break;
+  }
+  return {move:bestMove,best,scored};
+}
+function pickMove(s, difficulty){
+  const moves=genMoves(s);
+  if(moves.length===0) return null;
+  for(const m of moves) if((m.type==='move'||m.type==='jump')&&HOME_SET[1-s.toMove].has(m.to)) return m;
+  _nc=0;
+  if(difficulty==='easy'){
+    const deadline=Date.now()+700; let chosen=moves[0];
+    for(let d=2;d<=10;d++){
+      const r=bestAtDepth(s,moves,d,deadline);
+      if(r.move)chosen=r.move;
+      if(Date.now()>deadline)break;
+      if(Math.abs(r.best)>=WIN_SCORE)break;
+    }
+    return chosen;
+  }
+  if(difficulty==='medium'){
+    const deadline=Date.now()+1200; let chosen=moves[0]; let lastScored=[];
+    for(let d=2;d<=14;d++){
+      const r=bestAtDepth(s,moves,d,deadline);
+      if(r.move){chosen=r.move;lastScored=r.scored;}
+      if(Date.now()>deadline)break;
+      if(Math.abs(r.best)>=WIN_SCORE)break;
+    }
+    if(lastScored.length>0){
+      const bestVal=Math.max(...lastScored.map(o=>o.v));
+      const near=lastScored.filter(o=>o.v>=bestVal-40);
+      return near[(Math.random()*near.length)|0].move;
+    }
+    return chosen;
+  }
+  // hard: null move + warm TT across moves = effective depth far exceeds nominal
+  const deadline=Date.now()+2000; let chosen=moves[0]; let lastScored=[];
+  for(let d=2;d<=20;d++){
+    const r=bestAtDepth(s,moves,d,deadline);
+    if(r.move){chosen=r.move;lastScored=r.scored;}
+    if(Date.now()>deadline)break;
+    if(Math.abs(r.best)>=WIN_SCORE)break;
+  }
+  // small variety to avoid identical openings every game
+  if(lastScored.length>0){
+    const bestVal=Math.max(...lastScored.map(o=>o.v));
+    const near=lastScored.filter(o=>o.v>=bestVal-15);
+    return near[(Math.random()*near.length)|0].move;
+  }
+  return chosen;
+}
+return {W,H,DIRS,idx,cx,cy,inB,popcount,HOME,HOME_SET,initState,cloneState,genMoves,applyMove,pickMove};
+})();
+`;
+// run the core (defines globalThis.OCTI without leaking anything), then pull what the UI needs
+eval(CORE_SRC);
+const {W,H,DIRS,idx,cx,cy,inB,popcount,HOME,HOME_SET,initState,cloneState,genMoves,applyMove} = globalThis.OCTI;
+
+/* =================== AI WORKER (off the main thread) =================== */
+const workerGlue = `
+self.onmessage = function(e){
+  self.postMessage({move: globalThis.OCTI.pickMove(e.data.state, e.data.difficulty)});
+};`;
+const aiWorker = new Worker(URL.createObjectURL(
+  new Blob([CORE_SRC + workerGlue], {type:'application/javascript'})
+));
+
+/* =================== UI / RENDER =================== */
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const COL = { board:'#ece2c6', board2:'#e3d6b2', grid:'rgba(120,92,52,.32)',
+  frame1:'#3c2c1d', frame2:'#23160c', gold:'#e7b13c', goldD:'#a9772a',
+  p0:['#27a888','#1c8f74','#0c5a47'], p1:['#e85a44','#d64430','#992517'] };
+const FRAME = 14; // px of wooden frame inside canvas (scaled)
+let cell=60, ox=0, oy=0, DPR=1, BW=0;
+
+let game, history, selected, anim, thinking;
+let difficulty='medium', humanPlayer=0, aiPlayer=1, busy=false;
+
+function layout(){
+  const cssW = cv.clientWidth;
+  const cssH = cssW * (H+ /*frame*/0) / W; // keep cell square; height from ratio
+  // we want square cells: total inner = W*cell ; frame around. compute cell from width.
+  DPR = Math.min(window.devicePixelRatio||1, 2.5);
+  const frameCss = Math.round(cssW*0.032);
+  const innerW = cssW - frameCss*2;
+  cell = innerW / W;
+  const cssHeight = frameCss*2 + cell*H;
+  cv.style.height = cssHeight+'px';
+  cv.width = Math.round(cssW*DPR);
+  cv.height = Math.round(cssHeight*DPR);
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  ox = frameCss; oy = frameCss; BW = frameCss;
+}
+function cellCenter(i){ return { x: ox + (cx(i)+0.5)*cell, y: oy + (cy(i)+0.5)*cell }; }
+function dirUnit(d){ const v=DIRS[d]; const L=Math.hypot(v[0],v[1]); return {x:v[0]/L, y:v[1]/L}; }
+
+function octPath(p, cxp, cyp, r){
+  p.beginPath();
+  for(let k=0;k<8;k++){
+    const a = (-112.5 + 45*k) * Math.PI/180;
+    const x = cxp + r*Math.cos(a), y = cyp + r*Math.sin(a);
+    k? p.lineTo(x,y) : p.moveTo(x,y);
+  }
+  p.closePath();
+}
+function drawProng(cxp,cyp,r,d,colorMain,colorEdge,scale){
+  const u=dirUnit(d); scale=scale==null?1:scale;
+  const baseR=r*0.86, len=r*0.55*scale, halfW=r*0.20;
+  const bx=cxp+u.x*baseR, by=cyp+u.y*baseR;
+  const tx=cxp+u.x*(baseR+len), ty=cyp+u.y*(baseR+len);
+  const px=-u.y, py=u.x; // perpendicular
+  ctx.beginPath();
+  ctx.moveTo(bx+px*halfW, by+py*halfW);
+  ctx.lineTo(bx-px*halfW, by-py*halfW);
+  ctx.lineTo(tx-px*halfW*0.5, ty-py*halfW*0.5);
+  ctx.lineTo(tx+px*halfW*0.5, ty+py*halfW*0.5);
+  ctx.closePath();
+  ctx.fillStyle=colorMain; ctx.fill();
+  ctx.lineWidth=Math.max(1,r*0.05); ctx.strokeStyle=colorEdge; ctx.stroke();
+  // peg tip
+  ctx.beginPath(); ctx.arc(tx,ty,halfW*0.55,0,7); ctx.fillStyle=colorMain; ctx.fill(); ctx.strokeStyle=colorEdge; ctx.stroke();
+}
+function drawPod(cxp,cyp,player,prongs,opts){
+  opts=opts||{};
+  const r=cell*0.37*(opts.scale||1);
+  const C = player===0?COL.p0:COL.p1;
+  // prongs (behind/around)
+  for(let d=0; d<8; d++) if(prongs & (1<<d)) drawProng(cxp,cyp,r,d,COL.gold,COL.goldD, opts.prongScale);
+  // body
+  ctx.save();
+  if(opts.alpha!=null) ctx.globalAlpha=opts.alpha;
+  octPath(ctx,cxp,cyp,r);
+  const g=ctx.createRadialGradient(cxp-r*0.35,cyp-r*0.4,r*0.2, cxp,cyp,r*1.05);
+  g.addColorStop(0,C[0]); g.addColorStop(0.6,C[1]); g.addColorStop(1,C[2]);
+  ctx.fillStyle=g; ctx.fill();
+  ctx.lineWidth=Math.max(1.4,r*0.09); ctx.strokeStyle=C[2]; ctx.stroke();
+  // inner ring
+  octPath(ctx,cxp,cyp,r*0.62);
+  ctx.lineWidth=Math.max(1,r*0.05); ctx.strokeStyle='rgba(255,255,255,.18)'; ctx.stroke();
+  ctx.restore();
+}
+
+function legalForSelected(){
+  if(selected==null) return [];
+  return genMoves(game).filter(m=>m.from===selected);
+}
+function targetMap(){
+  // cell -> chosen move (prefer jump w/ most captures)
+  const map=new Map();
+  for(const m of legalForSelected()){
+    if(m.type==='add') continue;
+    const prev=map.get(m.to);
+    if(!prev){ map.set(m.to,m); continue; }
+    const capN=mm=>mm.type==='jump'?mm.jumped.filter(mi=>game.board[mi]&&game.board[mi].player!==game.toMove).length:0;
+    if(capN(m)>capN(prev)) map.set(m.to,m);
+  }
+  return map;
+}
+
+function render(){
+  const w=cv.clientWidth, h=parseFloat(cv.style.height);
+  ctx.clearRect(0,0,w,h);
+  // wooden frame
+  const fg=ctx.createLinearGradient(0,0,w,h);
+  fg.addColorStop(0,COL.frame1); fg.addColorStop(1,COL.frame2);
+  roundRect(0,0,w,h,10); ctx.fillStyle=fg; ctx.fill();
+  // board face
+  const bx=ox, by=oy, bw=cell*W, bh=cell*H;
+  const bg=ctx.createLinearGradient(bx,by,bx,by+bh);
+  bg.addColorStop(0,COL.board); bg.addColorStop(1,COL.board2);
+  ctx.fillStyle=bg; ctx.fillRect(bx,by,bw,bh);
+  // home tints
+  for(let p=0;p<2;p++){
+    ctx.fillStyle = p===0 ? 'rgba(28,143,116,.26)' : 'rgba(214,68,48,.24)';
+    for(const i of HOME[p]){ const x=ox+cx(i)*cell, y=oy+cy(i)*cell; ctx.fillRect(x,y,cell,cell); }
+  }
+  // grid
+  ctx.strokeStyle=COL.grid; ctx.lineWidth=1;
+  for(let c=0;c<=W;c++){ const x=Math.round(ox+c*cell)+.5; ctx.beginPath(); ctx.moveTo(x,by); ctx.lineTo(x,by+bh); ctx.stroke(); }
+  for(let r=0;r<=H;r++){ const y=Math.round(oy+r*cell)+.5; ctx.beginPath(); ctx.moveTo(bx,y); ctx.lineTo(bx+bw,y); ctx.stroke(); }
+  // board inner shadow edge
+  ctx.strokeStyle='rgba(0,0,0,.18)'; ctx.lineWidth=2; ctx.strokeRect(bx+1,by+1,bw-2,bh-2);
+
+  const animTo = anim && (anim.type==='move'||anim.type==='jump') ? anim.move.to : -1;
+  const captured = anim && anim.captured ? anim.captured : [];
+
+  // pods (skip the one currently flying; fade captured)
+  for(let i=0;i<game.board.length;i++){
+    const pod=game.board[i]; if(!pod) continue;
+    if(i===animTo) continue;
+    const c=cellCenter(i);
+    let alpha=1, pscale=1;
+    if(captured.indexOf(i)!==-1 && anim){ alpha = 1-anim.p; }
+    if(anim && anim.type==='add' && i===anim.move.from){
+      // draw existing prongs full + the new one growing
+      drawPodWithGrowingProng(c.x,c.y,pod,anim.move.dir,anim.p);
+      continue;
+    }
+    drawPod(c.x,c.y,pod.player,pod.prongs,{alpha});
+  }
+
+  // selection + hints (only when human's turn, not animating)
+  if(selected!=null && !anim && game.toMove===humanPlayer){
+    const c=cellCenter(selected);
+    // glow
+    ctx.save(); ctx.beginPath(); ctx.arc(c.x,c.y,cell*0.46,0,7);
+    ctx.strokeStyle='rgba(231,177,60,.9)'; ctx.lineWidth=3; ctx.shadowColor='rgba(231,177,60,.7)'; ctx.shadowBlur=12; ctx.stroke(); ctx.restore();
+    // ghost prongs for adds
+    if(game.reserve[humanPlayer]>0){
+      const pod=game.board[selected];
+      for(let d=0;d<8;d++) if(!(pod.prongs&(1<<d))){
+        const u=dirUnit(d), r=cell*0.37;
+        const tx=c.x+u.x*(r*0.86+r*0.5), ty=c.y+u.y*(r*0.86+r*0.5);
+        ctx.save(); ctx.globalAlpha=0.5; drawProng(c.x,c.y,r,d,'rgba(231,177,60,.55)','rgba(169,119,42,.7)',1); ctx.restore();
+        ctx.fillStyle='rgba(60,40,18,.85)'; ctx.font='bold '+(cell*0.18)+'px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillText('+', tx, ty);
+      }
+    }
+    // move / jump targets
+    const tmap=targetMap();
+    tmap.forEach((m,i)=>{
+      const t=cellCenter(i);
+      if(m.type==='move'){
+        ctx.beginPath(); ctx.arc(t.x,t.y,cell*0.16,0,7); ctx.fillStyle='rgba(40,28,14,.4)'; ctx.fill();
+      } else {
+        const caps=m.jumped.filter(mi=>game.board[mi]&&game.board[mi].player!==game.toMove).length;
+        ctx.beginPath(); ctx.arc(t.x,t.y,cell*0.30,0,7);
+        ctx.lineWidth=3; ctx.strokeStyle= caps>0 ? 'rgba(214,68,48,.9)':'rgba(40,28,14,.55)'; ctx.stroke();
+        ctx.beginPath(); ctx.arc(t.x,t.y,cell*0.10,0,7); ctx.fillStyle=caps>0?'rgba(214,68,48,.8)':'rgba(40,28,14,.45)'; ctx.fill();
+      }
+    });
+  }
+
+  // flying pod
+  if(anim && (anim.type==='move'||anim.type==='jump')){
+    const pos=animPos(); const pod=game.board[anim.move.to];
+    let lift=0;
+    if(anim.type==='jump'){ lift = -Math.sin(anim.p*Math.PI)*cell*0.22; }
+    drawPod(pos.x, pos.y+lift, pod.player, pod.prongs, {scale:1+ (anim.type==='jump'?0.06*Math.sin(anim.p*Math.PI):0)});
+  }
+}
+function drawPodWithGrowingProng(x,y,pod,dir,t){
+  // body
+  drawPod(x,y,pod.player,pod.prongs & ~(1<<dir),{});
+  const r=cell*0.37;
+  drawProng(x,y,r,dir,COL.gold,COL.goldD, t);
+}
+function roundRect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+/* ---- animation ---- */
+function animPath(pre, m){
+  const pts=[m.from];
+  if(m.type==='jump'){
+    let cur=m.from;
+    for(const mi of m.jumped){ const land=idx(2*cx(mi)-cx(cur), 2*cy(mi)-cy(cur)); pts.push(land); cur=land; }
+  } else pts.push(m.to);
+  return pts.map(cellCenter);
+}
+function animPos(){
+  const segs=anim.pts.length-1; const tt=anim.p*segs; const s=Math.min(segs-1, tt|0); const f=tt-s;
+  const a=anim.pts[s], b=anim.pts[s+1];
+  return { x:a.x+(b.x-a.x)*f, y:a.y+(b.y-a.y)*f };
+}
+function startAnim(pre, m, after){
+  const mover=pre.toMove;
+  const captured = m.type==='jump' ? m.jumped.filter(mi=>pre.board[mi]&&pre.board[mi].player!==mover) : [];
+  anim = { type:m.type, move:m, p:0, t0:performance.now(),
+           dur: m.type==='add'?150 : (m.type==='jump'? 240+ (m.jumped.length*120) : 300),
+           pts: (m.type!=='add')?animPath(pre,m):null, captured, after };
+  requestAnimationFrame(stepAnim);
+}
+function stepAnim(now){
+  const e=Math.min(1,(now-anim.t0)/anim.dur);
+  anim.p = e<0.5 ? 2*e*e : 1-Math.pow(-2*e+2,2)/2; // easeInOutQuad
+  render();
+  if(e<1){ requestAnimationFrame(stepAnim); }
+  else { const cb=anim.after; anim=null; render(); cb&&cb(); }
+}
+
+/* ---- flow ---- */
+function newGame(){
+  game=initState(); game.toMove = (humanPlayer===0)?0:0; // p0 always starts the game
+  // "who opens" maps to which side the human is
+  history=[]; selected=null; anim=null; busy=false;
+  document.getElementById('overlay').classList.remove('show');
+  updateStatus(); render();
+  if(game.toMove===aiPlayer) aiTurn();
+}
+function updateStatus(){
+  document.getElementById('res0').textContent=game.reserve[humanPlayer];
+  document.getElementById('res1').textContent=game.reserve[aiPlayer];
+  const dot=document.getElementById('turnDot'), txt=document.getElementById('turnTxt');
+  if(game.winner!=null){ return; }
+  const human = game.toMove===humanPlayer;
+  dot.style.background = (game.toMove===0?COL.p0[1]:COL.p1[1]);
+  txt.textContent = human ? 'תורך' : 'תור היריב…';
+  document.getElementById('undoBtn').disabled = history.length<1 || busy;
+}
+function execute(m){
+  const pre=game;
+  game=applyMove(pre,m);
+  startAnim(pre,m,()=>{ postMove(); });
+}
+function postMove(){
+  updateStatus(); render();
+  if(game.winner!=null){ showWin(); return; }
+  if(genMoves(game).length===0){ // stuck = loss for side to move
+    game.winner = 1-game.toMove; showWin(); return;
+  }
+  if(game.toMove===aiPlayer) aiTurn();
+  else { busy=false; updateStatus(); }
+}
+function aiTurn(){
+  busy=true; selected=null; updateStatus();
+  document.getElementById('thinking').textContent='היריב חושב…';
+  const t0=performance.now();
+  history.push(cloneState(game));
+  aiWorker.onmessage=(e)=>{
+    const m=e.data.move;
+    const wait=Math.max(0, 80 - (performance.now()-t0));
+    setTimeout(()=>{ document.getElementById('thinking').textContent=''; if(m) execute(m); else { game.winner=humanPlayer; showWin(); } }, wait);
+  };
+  aiWorker.postMessage({state:game, difficulty});
+}
+function showWin(){
+  const ov=document.getElementById('overlay');
+  const won = game.winner===humanPlayer;
+  document.getElementById('winBig').textContent = won ? 'ניצחת! 🎉' : 'היריב ניצח';
+  document.getElementById('winBig').style.color = won? COL.p0[0] : COL.p1[0];
+  document.getElementById('winSub').textContent = won ? 'הגעת למשבצת בית של היריב' : 'נסה שוב — אפשר לשנות רמת קושי';
+  document.getElementById('turnTxt').textContent = won?'ניצחת':'הפסדת';
+  ov.classList.add('show'); busy=true;
+  document.getElementById('undoBtn').disabled=true;
+}
+
+/* ---- input ---- */
+function canvasPoint(ev){
+  const r=cv.getBoundingClientRect();
+  const e = ev.touches? ev.touches[0] : ev;
+  return { x:(e.clientX-r.left), y:(e.clientY-r.top) };
+}
+function cellAt(px,py){
+  const x=Math.floor((px-ox)/cell), y=Math.floor((py-oy)/cell);
+  if(x<0||x>=W||y<0||y>=H) return -1; return idx(x,y);
+}
+function onTap(ev){
+  if(busy||anim||game.winner!=null||game.toMove!==humanPlayer) return;
+  ev.preventDefault();
+  const pt=canvasPoint(ev);
+  // 1) if a pod is selected, check ghost-prong taps first
+  if(selected!=null && game.reserve[humanPlayer]>0){
+    const pod=game.board[selected], c=cellCenter(selected), r=cell*0.37;
+    for(let d=0;d<8;d++) if(!(pod.prongs&(1<<d))){
+      const u=dirUnit(d); const tx=c.x+u.x*(r*0.86+r*0.5), ty=c.y+u.y*(r*0.86+r*0.5);
+      if(Math.hypot(pt.x-tx,pt.y-ty) < cell*0.26){
+        history.push(cloneState(game)); execute({type:'add',from:selected,dir:d}); return;
+      }
+    }
+  }
+  const i=cellAt(pt.x,pt.y);
+  if(i<0){ selected=null; render(); return; }
+  // 2) target cell?
+  if(selected!=null){
+    const tmap=targetMap();
+    if(tmap.has(i)){ history.push(cloneState(game)); execute(tmap.get(i)); return; }
+  }
+  // 3) select own pod
+  const pod=game.board[i];
+  if(pod && pod.player===humanPlayer){ selected = (selected===i)? null : i; render(); return; }
+  // 4) elsewhere
+  selected=null; render();
+}
+cv.addEventListener('pointerdown', onTap);
+
+function undo(){
+  if(busy||anim||history.length<1) return;
+  // revert until it's the human's turn again (undo the AI reply + your move)
+  let target=null;
+  while(history.length){ const s=history.pop(); if(s.toMove===humanPlayer){ target=s; break; } target=s; }
+  if(target){ game=target; selected=null; document.getElementById('overlay').classList.remove('show');
+    busy=false; updateStatus(); render(); }
+}
+
+/* ---- controls ---- */
+document.getElementById('diffSeg').addEventListener('click',e=>{
+  const b=e.target.closest('button[data-diff]'); if(!b) return;
+  difficulty=b.dataset.diff;
+  [...e.currentTarget.querySelectorAll('button')].forEach(x=>x.classList.toggle('on',x===b));
+});
+document.getElementById('startSeg').addEventListener('click',e=>{
+  const b=e.target.closest('button[data-start]'); if(!b) return;
+  humanPlayer = b.dataset.start==='0'?0:1; aiPlayer=1-humanPlayer;
+  [...e.currentTarget.querySelectorAll('button')].forEach(x=>x.classList.toggle('on',x===b));
+  newGame();
+});
+document.getElementById('newBtn').addEventListener('click',newGame);
+document.getElementById('againBtn').addEventListener('click',newGame);
+document.getElementById('undoBtn').addEventListener('click',undo);
+
+window.addEventListener('resize',()=>{ layout(); render(); });
+layout(); newGame();
+</script>
+</body>
+</html>
