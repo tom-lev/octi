@@ -102,6 +102,7 @@
   <div class="controls">
     <button class="btn" id="newBtn">משחק חדש</button>
     <button class="btn" id="undoBtn">ביטול מהלך</button>
+    <button class="btn" id="exportBtn" style="border-color:#e7b13c55;color:#e7b13c;" disabled>📋 העתק נתונים <span id="gameCount">(0)</span></button>
   </div>
 
   <div class="status">
@@ -605,63 +606,55 @@ let _bookPattern=0;
 
 function pickMove(s, difficulty){
   const moves=genMoves(s);
-  if(moves.length===0) return null;
+  if(moves.length===0) return {move:null, scored:[], depth:0};
   // Always take an immediate win
-  for(const m of moves) if((m.type==='move'||m.type==='jump')&&HOME_SET[1-s.toMove].has(m.to)) return m;
+  for(const m of moves) if((m.type==='move'||m.type==='jump')&&HOME_SET[1-s.toMove].has(m.to)) return {move:m, scored:[{move:m,v:WIN_SCORE}], depth:0};
   _nc=0;
 
   // Opening book (first 2 moves per side, only in medium/hard)
   if(difficulty!=='easy'){
     const book = s.toMove===0 ? OPENING_BOOK_P0 : OPENING_BOOK_P1;
-    // Count how many pieces have prongs (proxy for move number)
     let pronged=0;
     for(let i=0;i<s.board.length;i++){ const pod=s.board[i]; if(pod&&pod.player===s.toMove&&pod.prongs>0) pronged++; }
     if(pronged<2){
-      // Use book with some randomness for variety
       const pat = book[(_bookPattern + s.toMove*3) % book.length];
       const bmove = pat[pronged];
-      // Verify the move is legal
       if(bmove && moves.some(m=>m.type===bmove.type&&m.from===bmove.from&&('dir' in bmove?m.dir===bmove.dir:true))){
-        if(pronged===0){
-          // Occasionally pick a different pattern for variety
-          if(Math.random()<0.4) _bookPattern=(_bookPattern+1)%book.length;
-        }
-        return bmove;
+        if(pronged===0){ if(Math.random()<0.4) _bookPattern=(_bookPattern+1)%book.length; }
+        return {move:bmove, scored:[{move:bmove,v:0}], depth:0};
       }
     }
   }
 
   const timeLimits = {easy:1500, medium:3000, hard:5000};
   const deadline=Date.now()+timeLimits[difficulty];
-  let chosen=moves[0]; let lastScored=[];
+  let chosen=moves[0]; let lastScored=[]; let reachedDepth=1;
 
-  // Determine search depth ceiling by difficulty
   const maxDepth = {easy:10, medium:16, hard:22}[difficulty];
 
   for(let d=2;d<=maxDepth;d++){
     const r=bestAtDepth(s,moves,d,deadline,lastScored);
-    if(r.move){chosen=r.move;lastScored=r.scored;}
+    if(r.move){chosen=r.move;lastScored=r.scored;reachedDepth=d;}
     if(Date.now()>deadline)break;
     if(Math.abs(r.best)>=WIN_SCORE)break;
   }
 
-  if(lastScored.length===0) return chosen;
+  if(lastScored.length===0) return {move:chosen, scored:[], depth:reachedDepth};
 
   const bestVal=Math.max(...lastScored.map(o=>o.v));
+  let finalMove;
 
   if(difficulty==='easy'){
-    // More randomness: accept moves within 120 of best
     const near=lastScored.filter(o=>o.v>=bestVal-120);
-    return near[(Math.random()*near.length)|0].move;
-  }
-  if(difficulty==='medium'){
-    // Some variety: within 50 of best
+    finalMove=near[(Math.random()*near.length)|0].move;
+  } else if(difficulty==='medium'){
     const near=lastScored.filter(o=>o.v>=bestVal-50);
-    return near[(Math.random()*near.length)|0].move;
+    finalMove=near[(Math.random()*near.length)|0].move;
+  } else {
+    const near=lastScored.filter(o=>o.v>=bestVal-25);
+    finalMove=near[(Math.random()*near.length)|0].move;
   }
-  // hard: very small variety window (25), but avoid pure determinism
-  const near=lastScored.filter(o=>o.v>=bestVal-25);
-  return near[(Math.random()*near.length)|0].move;
+  return {move:finalMove, scored:lastScored, depth:reachedDepth};
 }
 return {W,H,DIRS,idx,cx,cy,inB,popcount,HOME,HOME_SET,initState,cloneState,genMoves,applyMove,pickMove};
 })();
@@ -673,11 +666,140 @@ const {W,H,DIRS,idx,cx,cy,inB,popcount,HOME,HOME_SET,initState,cloneState,genMov
 /* =================== AI WORKER =================== */
 const workerGlue = `
 self.onmessage = function(e){
-  self.postMessage({move: globalThis.OCTI.pickMove(e.data.state, e.data.difficulty)});
+  const result = globalThis.OCTI.pickMove(e.data.state, e.data.difficulty);
+  self.postMessage({move: result.move, scored: result.scored, depth: result.depth});
 };`;
 const aiWorker = new Worker(URL.createObjectURL(
   new Blob([CORE_SRC + workerGlue], {type:'application/javascript'})
 ));
+
+/* =================== DATA COLLECTOR =================== */
+const DataCollector = {
+  games: [],
+  currentGame: null,
+
+  startGame(humanP, diff) {
+    this.currentGame = {
+      gameNum: this.games.length + 1,
+      difficulty: diff,
+      humanPlayer: humanP,
+      moves: [],       // every move in order
+      aiDecisions: [], // detailed AI decision points
+      result: null,    // 'human_win' | 'ai_win'
+      totalMoves: 0,
+    };
+  },
+
+  recordHumanMove(stateBefore, move) {
+    if (!this.currentGame) return;
+    this.currentGame.moves.push({
+      turn: this.currentGame.totalMoves++,
+      by: 'human',
+      type: move.type,
+      from: move.from,
+      to: move.to != null ? move.to : null,
+      dir: move.dir != null ? move.dir : null,
+      board: this._encodeBoard(stateBefore.board),
+      reserve: [...stateBefore.reserve],
+    });
+  },
+
+  recordAIDecision(stateBefore, chosenMove, allScored, searchDepth) {
+    if (!this.currentGame) return;
+    // Top 5 moves by score
+    const top5 = (allScored || [])
+      .slice().sort((a,b) => b.v - a.v).slice(0, 5)
+      .map(o => ({ type: o.move.type, from: o.move.from, to: o.move.to, dir: o.move.dir, score: Math.round(o.v) }));
+
+    const entry = {
+      turn: this.currentGame.totalMoves++,
+      by: 'ai',
+      type: chosenMove.type,
+      from: chosenMove.from,
+      to: chosenMove.to != null ? chosenMove.to : null,
+      dir: chosenMove.dir != null ? chosenMove.dir : null,
+      board: this._encodeBoard(stateBefore.board),
+      reserve: [...stateBefore.reserve],
+      chosenScore: top5.length > 0 ? top5.find(o=>o.from===chosenMove.from&&o.to===chosenMove.to) : null,
+      top5,
+      searchDepth,
+    };
+    this.currentGame.moves.push(entry);
+    this.currentGame.aiDecisions.push(entry);
+  },
+
+  recordResult(winner, humanP) {
+    if (!this.currentGame) return;
+    this.currentGame.result = winner === humanP ? 'human_win' : 'ai_win';
+    this.currentGame.finalMoveCount = this.currentGame.totalMoves;
+    // Tag the last few moves before human win — these are the critical "AI missed" moments
+    if (this.currentGame.result === 'human_win') {
+      const aiMoves = this.currentGame.aiDecisions;
+      // Mark the last 3 AI decisions as "potentially missed threat"
+      for (let i = Math.max(0, aiMoves.length - 3); i < aiMoves.length; i++) {
+        aiMoves[i].beforeHumanWin = true;
+      }
+    }
+    this.games.push(this.currentGame);
+    this.currentGame = null;
+  },
+
+  _encodeBoard(board) {
+    // Compact: "player:prongs@idx,..." only non-null cells
+    return board.map((c,i) => c ? `${c.player}:${c.prongs}@${i}` : null).filter(Boolean).join(',');
+  },
+
+  export() {
+    const summary = {
+      totalGames: this.games.length,
+      humanWins: this.games.filter(g => g.result === 'human_win').length,
+      aiWins: this.games.filter(g => g.result === 'ai_win').length,
+      games: this.games.map(g => ({
+        gameNum: g.gameNum,
+        difficulty: g.difficulty,
+        result: g.result,
+        totalMoves: g.finalMoveCount,
+        // Critical: AI decisions right before human won
+        missedDefenses: g.aiDecisions
+          .filter(d => d.beforeHumanWin)
+          .map(d => ({
+            turn: d.turn,
+            board: d.board,
+            reserve: d.reserve,
+            aiChose: { type: d.type, from: d.from, to: d.to, dir: d.dir, score: d.chosenScore?.score },
+            top5: d.top5,
+          })),
+        // All AI decisions for full analysis
+        allAIDecisions: g.aiDecisions.map(d => ({
+          turn: d.turn,
+          aiChose: { type: d.type, from: d.from, to: d.to, dir: d.dir },
+          chosenScore: d.chosenScore?.score,
+          top5: d.top5,
+          depth: d.searchDepth,
+          beforeHumanWin: d.beforeHumanWin || false,
+        })),
+      })),
+    };
+    return JSON.stringify(summary, null, 2);
+  },
+
+  copyToClipboard() {
+    const data = this.export();
+    navigator.clipboard.writeText(data).then(() => {
+      alert(`✓ הנתונים הועתקו ל-clipboard!\n${this.games.length} משחקים, ${data.length} תווים`);
+    }).catch(() => {
+      // Fallback: show in textarea
+      const ta = document.createElement('textarea');
+      ta.value = data;
+      ta.style.cssText = 'position:fixed;top:10px;left:10px;right:10px;height:60vh;z-index:9999;font-size:11px;direction:ltr;';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      setTimeout(() => ta.remove(), 5000);
+      alert(`הנתונים מוצגים בחלון — העתק ידנית (Ctrl+A, Ctrl+C)`);
+    });
+  }
+};
 
 /* =================== UI / RENDER =================== */
 const cv = document.getElementById('cv');
@@ -877,6 +999,7 @@ function newGame(){
   game=initState(); game.toMove=0;
   history=[]; selected=null; anim=null; busy=false;
   document.getElementById('overlay').classList.remove('show');
+  DataCollector.startGame(humanPlayer, difficulty);
   updateStatus(); render();
   if(game.toMove===aiPlayer) aiTurn();
 }
@@ -889,8 +1012,9 @@ function updateStatus(){
   txt.textContent = game.toMove===humanPlayer ? 'תורך' : 'תור היריב…';
   document.getElementById('undoBtn').disabled = history.length<1 || busy;
 }
-function execute(m){
+function execute(m, isHuman){
   const pre=game;
+  if(isHuman) DataCollector.recordHumanMove(pre, m);
   game=applyMove(pre,m);
   startAnim(pre,m,()=>{ postMove(); });
 }
@@ -905,15 +1029,21 @@ function aiTurn(){
   busy=true; selected=null; updateStatus();
   document.getElementById('thinking').textContent='היריב חושב…';
   const t0=performance.now();
-  history.push(cloneState(game));
+  const stateSnapshot=cloneState(game);
+  history.push(stateSnapshot);
   aiWorker.onmessage=(e)=>{
     const m=e.data.move;
+    const scored=e.data.scored||[];
+    const depth=e.data.depth||0;
+    DataCollector.recordAIDecision(stateSnapshot, m, scored, depth);
     const wait=Math.max(0, 80 - (performance.now()-t0));
-    setTimeout(()=>{ document.getElementById('thinking').textContent=''; if(m) execute(m); else { game.winner=humanPlayer; showWin(); } }, wait);
+    setTimeout(()=>{ document.getElementById('thinking').textContent=''; if(m) execute(m, false); else { game.winner=humanPlayer; showWin(); } }, wait);
   };
   aiWorker.postMessage({state:game, difficulty});
 }
 function showWin(){
+  DataCollector.recordResult(game.winner, humanPlayer);
+  updateDataCounter();
   const ov=document.getElementById('overlay');
   const won = game.winner===humanPlayer;
   document.getElementById('winBig').textContent = won ? 'ניצחת! 🎉' : 'היריב ניצח';
@@ -943,7 +1073,7 @@ function onTap(ev){
     for(let d=0;d<8;d++) if(!(pod.prongs&(1<<d))){
       const u=dirUnit(d); const tx=c.x+u.x*(r*0.86+r*0.5), ty=c.y+u.y*(r*0.86+r*0.5);
       if(Math.hypot(pt.x-tx,pt.y-ty) < cell*0.26){
-        history.push(cloneState(game)); execute({type:'add',from:selected,dir:d}); return;
+        history.push(cloneState(game)); execute({type:'add',from:selected,dir:d}, true); return;
       }
     }
   }
@@ -951,7 +1081,7 @@ function onTap(ev){
   if(i<0){ selected=null; render(); return; }
   if(selected!=null){
     const tmap=targetMap();
-    if(tmap.has(i)){ history.push(cloneState(game)); execute(tmap.get(i)); return; }
+    if(tmap.has(i)){ history.push(cloneState(game)); execute(tmap.get(i), true); return; }
   }
   const pod=game.board[i];
   if(pod && pod.player===humanPlayer){ selected = (selected===i)? null : i; render(); return; }
@@ -979,9 +1109,16 @@ document.getElementById('startSeg').addEventListener('click',e=>{
   [...e.currentTarget.querySelectorAll('button')].forEach(x=>x.classList.toggle('on',x===b));
   newGame();
 });
+function updateDataCounter(){
+  const n=DataCollector.games.length;
+  document.getElementById('gameCount').textContent=`(${n})`;
+  document.getElementById('exportBtn').disabled = n===0;
+}
+
 document.getElementById('newBtn').addEventListener('click',newGame);
 document.getElementById('againBtn').addEventListener('click',newGame);
 document.getElementById('undoBtn').addEventListener('click',undo);
+document.getElementById('exportBtn').addEventListener('click',()=>DataCollector.copyToClipboard());
 
 window.addEventListener('resize',()=>{ layout(); render(); });
 layout(); newGame();
