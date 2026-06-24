@@ -277,7 +277,10 @@ function evaluate(s){
       myPods++; score+=pv*8;
       if(total>0){
         const d=chebToHome(i,HOME[q]); score+=(7-d)*12;
-        const ttw=fwd>0?d:(s.reserve[p]>0?d+1:99);
+        // Check if pod can reach enemy home via a jump sequence (counts as TTW=1)
+        const js=genJumps(b,i,pod.prongs);
+        const jumpWin=js.some(j=>HOME_SET[q].has(j.to));
+        const ttw=jumpWin?1:(fwd>0?d:(s.reserve[p]>0?d+1:99));
         if(ttw<myMinTTW)myMinTTW=ttw; if(ttw<=3)myThreats++;
       } else if(s.reserve[p]>0){
         const ttw=chebToHome(i,HOME[q])+1;
@@ -287,7 +290,9 @@ function evaluate(s){
       opPods++; score-=pv*8;
       if(total>0){
         const d=chebToHome(i,HOME[p]); score-=(7-d)*12;
-        const ttw=fwd>0?d:(s.reserve[q]>0?d+1:99);
+        const js=genJumps(b,i,pod.prongs);
+        const jumpWin=js.some(j=>HOME_SET[p].has(j.to));
+        const ttw=jumpWin?1:(fwd>0?d:(s.reserve[q]>0?d+1:99));
         if(ttw<opMinTTW)opMinTTW=ttw; if(ttw<=3)opThreats++;
       } else if(s.reserve[q]>0){
         const ttw=chebToHome(i,HOME[p])+1;
@@ -302,8 +307,8 @@ function evaluate(s){
   if(myMinTTW<99&&opMinTTW<99) score+=180*(opMinTTW-myMinTTW);
   else if(myMinTTW<99) score+=180*(7-myMinTTW);
   else if(opMinTTW<99) score-=180*(7-opMinTTW);
-  if(myMinTTW<=1) score+=600; if(opMinTTW<=1) score-=650;
-  if(myMinTTW<=2) score+=250; if(opMinTTW<=2) score-=270;
+  if(myMinTTW<=1) score+=800; if(opMinTTW<=1) score-=950;
+  if(myMinTTW<=2) score+=300; if(opMinTTW<=2) score-=380;
   return score;
 }
 function moveOrderKey(s, m){
@@ -331,9 +336,9 @@ function negamax(s, depth, alpha, beta, deadline, allowNull){
     if(f===1){if(sc>alpha)alpha=sc;}else{if(sc<beta)beta=sc;}
     if(alpha>=beta) return sc;
   }
-  // Null move pruning: skip our turn — if still winning, prune this entire branch
-  if(allowNull&&depth>=4&&beta<WIN_SCORE/2){
-    const R=depth>=6?3:2;
+  // Null move pruning: only at depth>=6 to avoid pruning critical defensive responses
+  if(allowNull&&depth>=6&&beta<WIN_SCORE/2){
+    const R=depth>=8?3:2;
     const ns={board:s.board,reserve:s.reserve,toMove:1-s.toMove,winner:null};
     if(-negamax(ns,depth-1-R,-beta,-beta+1,deadline,false)>=beta) return beta;
   }
@@ -370,10 +375,24 @@ function pickMove(s, difficulty){
   if(moves.length===0) return null;
   for(const m of moves) if((m.type==='move'||m.type==='jump')&&HOME_SET[1-s.toMove].has(m.to)) return m;
   _nc=0;
+  // If opponent can win next move, only search among moves that block the win
+  let searchMoves=moves;
+  {
+    const qt={board:s.board,reserve:s.reserve,toMove:1-s.toMove,winner:null};
+    const qms=genMoves(qt);
+    if(qms.some(m=>(m.type==='move'||m.type==='jump')&&HOME_SET[s.toMove].has(m.to))){
+      const blk=moves.filter(m=>{
+        const ns=applyMove(s,m);
+        const qt2={board:ns.board,reserve:ns.reserve,toMove:1-ns.toMove,winner:null};
+        return !genMoves(qt2).some(m2=>(m2.type==='move'||m2.type==='jump')&&HOME_SET[ns.toMove].has(m2.to));
+      });
+      if(blk.length>0) searchMoves=blk;
+    }
+  }
   if(difficulty==='easy'){
-    const deadline=Date.now()+700; let chosen=moves[0];
+    const deadline=Date.now()+700; let chosen=searchMoves[0];
     for(let d=2;d<=10;d++){
-      const r=bestAtDepth(s,moves,d,deadline);
+      const r=bestAtDepth(s,searchMoves,d,deadline);
       if(r.move)chosen=r.move;
       if(Date.now()>deadline)break;
       if(Math.abs(r.best)>=WIN_SCORE)break;
@@ -381,9 +400,9 @@ function pickMove(s, difficulty){
     return chosen;
   }
   if(difficulty==='medium'){
-    const deadline=Date.now()+1200; let chosen=moves[0]; let lastScored=[];
+    const deadline=Date.now()+1200; let chosen=searchMoves[0]; let lastScored=[];
     for(let d=2;d<=14;d++){
-      const r=bestAtDepth(s,moves,d,deadline);
+      const r=bestAtDepth(s,searchMoves,d,deadline);
       if(r.move){chosen=r.move;lastScored=r.scored;}
       if(Date.now()>deadline)break;
       if(Math.abs(r.best)>=WIN_SCORE)break;
@@ -395,15 +414,14 @@ function pickMove(s, difficulty){
     }
     return chosen;
   }
-  // hard: null move + warm TT across moves = effective depth far exceeds nominal
-  const deadline=Date.now()+2000; let chosen=moves[0]; let lastScored=[];
+  // hard
+  const deadline=Date.now()+2000; let chosen=searchMoves[0]; let lastScored=[];
   for(let d=2;d<=20;d++){
-    const r=bestAtDepth(s,moves,d,deadline);
+    const r=bestAtDepth(s,searchMoves,d,deadline);
     if(r.move){chosen=r.move;lastScored=r.scored;}
     if(Date.now()>deadline)break;
     if(Math.abs(r.best)>=WIN_SCORE)break;
   }
-  // small variety to avoid identical openings every game
   if(lastScored.length>0){
     const bestVal=Math.max(...lastScored.map(o=>o.v));
     const near=lastScored.filter(o=>o.v>=bestVal-15);
