@@ -309,14 +309,14 @@ function evaluate(s){
     }
   }
   score+=8*(s.reserve[p]-s.reserve[q]);
-  score+=60*(myPods-opPods);
+  score+=80*(myPods-opPods);
   score+=50*(myThreats-opThreats);
   // Race: turns-to-win gap is the dominant strategic factor
   if(myMinTTW<99&&opMinTTW<99) score+=220*(opMinTTW-myMinTTW);
   else if(myMinTTW<99) score+=220*(6-myMinTTW);
   else if(opMinTTW<99) score-=220*(6-opMinTTW);
-  if(myMinTTW<=1) score+=900; if(opMinTTW<=1) score-=1050;
-  if(myMinTTW<=2) score+=350; if(opMinTTW<=2) score-=430;
+  if(myMinTTW<=1) score+=900; if(opMinTTW<=1) score-=1400;
+  if(myMinTTW<=2) score+=350; if(opMinTTW<=2) score-=600;
   // Home defense: penalize leaving own HOME cells empty when opponent is nearby
   for(const h of HOME[p]){
     if(!b[h]){
@@ -327,9 +327,25 @@ function evaluate(s){
           if(d<nearOpp)nearOpp=d;
         }
       }
-      if(nearOpp<=3) score-=(4-nearOpp)*120;
+      if(nearOpp<=3) score-=(4-nearOpp)*180;
     } else if(b[h].player===p){
-      score+=50; // bonus for a pod sitting on own HOME cell as blocker
+      score+=80;
+    }
+  }
+  // Penalize AI pods that opponent can capture with a single jump
+  for(let i=0;i<b.length;i++){
+    const pod=b[i]; if(!pod||pod.player!==p) continue;
+    const ix=cx(i), iy=cy(i);
+    for(let d=0;d<8;d++){
+      const dx=DIRS[d][0], dy=DIRS[d][1];
+      const ax=ix-dx, ay=iy-dy; // approach cell (opponent is here)
+      if(!inB(ax,ay)) continue;
+      const ai=idx(ax,ay);
+      if(!b[ai]||b[ai].player!==q) continue;
+      if(!(b[ai].prongs&(1<<d))) continue; // opponent has prong toward i
+      const lx=ix+dx, ly=iy+dy; // landing cell must be empty
+      if(!inB(lx,ly)||b[idx(lx,ly)]) continue;
+      score-=100; break; // pod is one-hop capturable
     }
   }
   return score;
