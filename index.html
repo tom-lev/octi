@@ -263,6 +263,7 @@ function evaluate(s){
   const p=s.toMove, q=1-p, b=s.board;
   let score=0, myPods=0, opPods=0;
   let myMinTTW=99, opMinTTW=99, myThreats=0, opThreats=0;
+  let myTTW1=0, myTTW2=0, opTTW1=0, opTTW2=0;
   for(let i=0;i<b.length;i++){
     const pod=b[i]; if(!pod) continue;
     const isMe=pod.player===p;
@@ -285,7 +286,8 @@ function evaluate(s){
         const js=genJumps(b,i,pod.prongs);
         const jumpWin=js.some(j=>HOME_SET[q].has(j.to));
         const ttw=jumpWin?1:(fwd>0?d:(s.reserve[p]>0?d+1:99));
-        if(ttw<myMinTTW)myMinTTW=ttw; if(ttw<=3)myThreats++;
+        if(ttw<myMinTTW)myMinTTW=ttw;
+        if(ttw<=1){myTTW1++;myThreats++;}else if(ttw<=2){myTTW2++;myThreats++;}else if(ttw<=3)myThreats++;
       } else if(s.reserve[p]>0){
         score += (7-chebToHome(i,HOME[q]))*5;
         const ttw=chebToHome(i,HOME[q])+1;
@@ -300,7 +302,8 @@ function evaluate(s){
         const js=genJumps(b,i,pod.prongs);
         const jumpWin=js.some(j=>HOME_SET[p].has(j.to));
         const ttw=jumpWin?1:(fwd>0?d:(s.reserve[q]>0?d+1:99));
-        if(ttw<opMinTTW)opMinTTW=ttw; if(ttw<=3)opThreats++;
+        if(ttw<opMinTTW)opMinTTW=ttw;
+        if(ttw<=1){opTTW1++;opThreats++;}else if(ttw<=2){opTTW2++;opThreats++;}else if(ttw<=3)opThreats++;
       } else if(s.reserve[q]>0){
         score -= (7-chebToHome(i,HOME[p]))*5;
         const ttw=chebToHome(i,HOME[p])+1;
@@ -310,13 +313,19 @@ function evaluate(s){
   }
   score+=8*(s.reserve[p]-s.reserve[q]);
   score+=80*(myPods-opPods);
-  score+=50*(myThreats-opThreats);
+  score+=40*(myThreats-opThreats);
   // Race: turns-to-win gap is the dominant strategic factor
   if(myMinTTW<99&&opMinTTW<99) score+=220*(opMinTTW-myMinTTW);
   else if(myMinTTW<99) score+=220*(6-myMinTTW);
   else if(opMinTTW<99) score-=220*(6-opMinTTW);
   if(myMinTTW<=1) score+=900; if(opMinTTW<=1) score-=1400;
   if(myMinTTW<=2) score+=350; if(opMinTTW<=2) score-=600;
+  // Non-linear fork bonuses: two simultaneous threats the opponent cannot both answer
+  if(myTTW1>=2) score+=2400;       // two pods each winning THIS turn = unblockable
+  else if(myTTW1>=1&&myTTW2>=1) score+=950; // immediate + one-turn-away fork
+  if(opTTW1>=2) score-=3400;
+  else if(opTTW1>=1&&opTTW2>=1) score-=1500;
+  if(myTTW2>=2) score+=520; if(opTTW2>=2) score-=780; // two two-move threats
   // Home defense: penalize leaving own HOME cells empty when opponent is nearby
   for(const h of HOME[p]){
     if(!b[h]){
@@ -327,7 +336,7 @@ function evaluate(s){
           if(d<nearOpp)nearOpp=d;
         }
       }
-      if(nearOpp<=3) score-=(4-nearOpp)*180;
+      if(nearOpp<=3) score-=(4-nearOpp)*310;
     } else if(b[h].player===p){
       score+=80;
     }
@@ -345,7 +354,7 @@ function evaluate(s){
       if(!(b[ai].prongs&(1<<d))) continue; // opponent has prong toward i
       const lx=ix+dx, ly=iy+dy; // landing cell must be empty
       if(!inB(lx,ly)||b[idx(lx,ly)]) continue;
-      score-=100; break; // pod is one-hop capturable
+      score-=240; break; // pod is one-hop capturable
     }
   }
   return score;
@@ -359,7 +368,9 @@ function moveOrderKey(s, m){
   }
   if(m.type==='move'){
     const d0=chebToHome(m.from,HOME[1-p]),d1=chebToHome(m.to,HOME[1-p]);
-    return 300+(d0-d1)*80;
+    // Bonus for reinforcing an empty own-home cell — critical defensive priority
+    const defBonus=HOME_SET[p].has(m.to)&&!b[m.to]?160:0;
+    return 300+(d0-d1)*80+defBonus;
   }
   // add prong: prefer forward prongs on pods that are already advanced and armed
   const dy=DIRS[m.dir][1],up=p===0;
@@ -370,8 +381,31 @@ function moveOrderKey(s, m){
   return 80+(7-d)*18+armed*12;
 }
 let _nc=0;
+// Quiescence search: at leaf nodes continue exploring forcing sequences
+// (captures AND moves into opponent home) so horizon doesn't cut off tactical shots
+function quiesce(s,alpha,beta,deadline){
+  if(!(++_nc&1023)&&Date.now()>deadline) return evaluate(s);
+  const stand=evaluate(s);
+  if(stand>=beta) return beta;
+  if(stand>alpha) alpha=stand;
+  const p=s.toMove;
+  const moves=genMoves(s).filter(m=>
+    ((m.type==='move'||m.type==='jump')&&HOME_SET[1-p].has(m.to)) ||
+    (m.type==='jump'&&m.jumped.some(mi=>s.board[mi]&&s.board[mi].player!==p))
+  );
+  if(!moves.length) return alpha;
+  moves.sort((a,b)=>moveOrderKey(s,b)-moveOrderKey(s,a));
+  for(const m of moves){
+    const ns=applyMove(s,m);
+    if(ns.winner===p) return WIN_SCORE; // immediate win found
+    const val=-quiesce(ns,-beta,-alpha,deadline);
+    if(val>=beta) return beta;
+    if(val>alpha) alpha=val;
+  }
+  return alpha;
+}
 function negamax(s, depth, alpha, beta, deadline, allowNull){
-  if(depth===0) return evaluate(s);
+  if(depth===0) return quiesce(s,alpha,beta,deadline);
   if(!(++_nc&1023)&&Date.now()>deadline) return evaluate(s);
   const h=zhash(s), slot=(h>>>0)&(TT_SIZE-1), origAlpha=alpha;
   if(tt_key[slot]===h&&tt_dep[slot]>=depth){
