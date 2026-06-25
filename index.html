@@ -243,6 +243,7 @@ const tt_key=new Int32Array(TT_SIZE);
 const tt_dep=new Int8Array(TT_SIZE);
 const tt_scr=new Int32Array(TT_SIZE);
 const tt_flg=new Uint8Array(TT_SIZE); // 0=exact,1=lower,2=upper
+const tt_mv=new Int32Array(TT_SIZE);  // best move (packed, +1) for PV extraction / diagnosis
 function zhash(s){
   let h=s.toMove?ZR[ZR.length-1]:0;
   for(let i=0;i<s.board.length;i++){
@@ -404,6 +405,12 @@ function quiesce(s,alpha,beta,deadline){
   }
   return alpha;
 }
+// Pack a move into one int for TT storage (lossy for jump capture-path, fine for PV following)
+function mvCode(m){
+  const t=m.type==='add'?0:m.type==='move'?1:2;
+  const sec=m.type==='add'?m.dir:m.to;
+  return (t<<12)|((m.from&63)<<6)|(sec&63);
+}
 function negamax(s, depth, alpha, beta, deadline, allowNull){
   if(depth===0) return quiesce(s,alpha,beta,deadline);
   if(!(++_nc&1023)&&Date.now()>deadline) return evaluate(s);
@@ -423,35 +430,71 @@ function negamax(s, depth, alpha, beta, deadline, allowNull){
   let moves=genMoves(s);
   if(moves.length===0) return -WIN_SCORE-depth;
   moves.sort((a,b)=>moveOrderKey(s,b)-moveOrderKey(s,a));
-  let best=-Infinity;
+  let best=-Infinity, bestMove=null;
   for(const m of moves){
     const ns=applyMove(s,m);
     const val=(ns.winner===s.toMove)?(WIN_SCORE+depth):-negamax(ns,depth-1,-beta,-alpha,deadline,true);
-    if(val>best)best=val;
+    if(val>best){best=val;bestMove=m;}
     if(best>alpha)alpha=best;
     if(alpha>=beta)break;
   }
   tt_key[slot]=h; tt_dep[slot]=depth; tt_scr[slot]=best;
   tt_flg[slot]=best<=origAlpha?2:best>=beta?1:0;
+  tt_mv[slot]=bestMove?mvCode(bestMove)+1:0;
   return best;
 }
 function bestAtDepth(s, moves, depth, deadline){
   moves=moves.slice().sort((a,b)=>moveOrderKey(s,b)-moveOrderKey(s,a));
-  let best=-Infinity,bestMove=moves[0],alpha=-Infinity; const scored=[];
+  let best=-Infinity,bestMove=moves[0],alpha=-Infinity; const scored=[]; let completed=true;
   for(const m of moves){
     const ns=applyMove(s,m);
     const val=(ns.winner===s.toMove)?(WIN_SCORE+depth):-negamax(ns,depth-1,-Infinity,-alpha,deadline,true);
     scored.push({move:m,v:val});
     if(val>best){best=val;bestMove=m;}
     if(best>alpha)alpha=best;
-    if(Date.now()>deadline)break;
+    if(Date.now()>deadline){completed=false;break;}
   }
-  return {move:bestMove,best,scored};
+  return {move:bestMove,best,scored,completed};
+}
+// --- PV extraction (walk the TT following stored best moves) ---
+function decodeMoveAt(s, code){
+  const t=code>>12, from=(code>>6)&63, sec=code&63;
+  for(const m of genMoves(s)){
+    const mt=m.type==='add'?0:m.type==='move'?1:2;
+    if(mt!==t||m.from!==from) continue;
+    if(t===0){ if(m.dir===sec) return m; } else if(m.to===sec) return m;
+  }
+  return null;
+}
+function extractPV(s, maxLen){
+  const pv=[]; let cur=cloneState(s); const seen=new Set();
+  for(let k=0;k<maxLen;k++){
+    const h=zhash(cur), slot=(h>>>0)&(TT_SIZE-1);
+    if(tt_key[slot]!==h) break;
+    const code=tt_mv[slot]; if(!code) break;
+    const m=decodeMoveAt(cur, code-1); if(!m) break;
+    const kk=h>>>0; if(seen.has(kk)) break; seen.add(kk);
+    pv.push(m); cur=applyMove(cur,m);
+    if(cur.winner!==null) break;
+  }
+  return pv;
+}
+// Rebuild a state from encodeBoard() string — lets us load any logged position for analysis
+function decodeBoard(str, toMove){
+  const ci=str.indexOf(':'); const res=str.slice(0,ci).split(',').map(Number);
+  const cells=str.slice(ci+1); const board=new Array(W*H).fill(null);
+  let p=0;
+  for(let i=0;i<W*H;i++){
+    if(cells[p]==='.'){ p++; continue; }
+    board[i]={player:+cells[p], prongs:parseInt(cells.substr(p+1,2),16)}; p+=3;
+  }
+  return {board, reserve:[res[0],res[1]], toMove:toMove||0, winner:null};
 }
 function pickMove(s, difficulty){
   const moves=genMoves(s);
-  if(moves.length===0) return null;
-  for(const m of moves) if((m.type==='move'||m.type==='jump')&&HOME_SET[1-s.toMove].has(m.to)) return m;
+  if(moves.length===0) return {move:null,depth:0,score:0,pv:[]};
+  for(const m of moves) if((m.type==='move'||m.type==='jump')&&HOME_SET[1-s.toMove].has(m.to))
+    return {move:m,depth:0,score:WIN_SCORE,pv:[m]};
   _nc=0;
   // If opponent can win next move, only search among moves that block the win
   let searchMoves=moves;
@@ -469,52 +512,38 @@ function pickMove(s, difficulty){
       if(blk.length>0) searchMoves=blk;
     }
   }
-  if(difficulty==='easy'){
-    const deadline=Date.now()+700; let chosen=searchMoves[0];
-    for(let d=2;d<=10;d++){
-      const r=bestAtDepth(s,searchMoves,d,deadline);
-      if(r.move)chosen=r.move;
-      if(Date.now()>deadline)break;
-      if(Math.abs(r.best)>=WIN_SCORE)break;
-    }
-    return chosen;
-  }
-  if(difficulty==='medium'){
-    const deadline=Date.now()+1200; let chosen=searchMoves[0]; let lastScored=[];
-    for(let d=2;d<=14;d++){
-      const r=bestAtDepth(s,searchMoves,d,deadline);
-      if(r.move){chosen=r.move;lastScored=r.scored;}
-      if(Date.now()>deadline)break;
-      if(Math.abs(r.best)>=WIN_SCORE)break;
-    }
-    if(lastScored.length>0){
-      const bestVal=Math.max(...lastScored.map(o=>o.v));
-      const near=lastScored.filter(o=>o.v>=bestVal-40);
-      return near[(Math.random()*near.length)|0].move;
-    }
-    return chosen;
-  }
-  // hard: deterministic best move, longer time budget
-  const deadline=Date.now()+4000; let chosen=searchMoves[0];
-  for(let d=2;d<=24;d++){
+  const budget = difficulty==='easy'?700 : difficulty==='medium'?1200 : 4000;
+  const maxDepth = difficulty==='easy'?10 : difficulty==='medium'?14 : 24;
+  const deadline=Date.now()+budget;
+  let chosen=searchMoves[0], reached=0, score=0, lastScored=[];
+  for(let d=2;d<=maxDepth;d++){
     const r=bestAtDepth(s,searchMoves,d,deadline);
-    if(r.move) chosen=r.move;
+    if(r.completed){ chosen=r.move; lastScored=r.scored; reached=d; score=r.best; }
+    else if(r.move){ chosen=r.move; } // partial result: trust the move but not the depth
     if(Date.now()>deadline)break;
     if(Math.abs(r.best)>=WIN_SCORE)break;
   }
-  return chosen;
+  let played=chosen;
+  // medium plays slightly imperfectly: random among near-best moves (keeps it beatable)
+  if(difficulty==='medium' && lastScored.length>0){
+    const bestVal=Math.max(...lastScored.map(o=>o.v));
+    const near=lastScored.filter(o=>o.v>=bestVal-40);
+    played=near[(Math.random()*near.length)|0].move;
+  }
+  return {move:played, depth:reached, score, pv:extractPV(s,8)};
 }
-return {W,H,DIRS,idx,cx,cy,inB,popcount,HOME,HOME_SET,initState,cloneState,genMoves,applyMove,pickMove};
+return {W,H,DIRS,idx,cx,cy,inB,popcount,HOME,HOME_SET,initState,cloneState,genMoves,applyMove,pickMove,evaluate,decodeBoard};
 })();
 `;
 // run the core (defines globalThis.OCTI without leaking anything), then pull what the UI needs
 eval(CORE_SRC);
-const {W,H,DIRS,idx,cx,cy,inB,popcount,HOME,HOME_SET,initState,cloneState,genMoves,applyMove} = globalThis.OCTI;
+const {W,H,DIRS,idx,cx,cy,inB,popcount,HOME,HOME_SET,initState,cloneState,genMoves,applyMove,decodeBoard} = globalThis.OCTI;
 
 /* =================== AI WORKER (off the main thread) =================== */
 const workerGlue = `
 self.onmessage = function(e){
-  self.postMessage({move: globalThis.OCTI.pickMove(e.data.state, e.data.difficulty)});
+  const r = globalThis.OCTI.pickMove(e.data.state, e.data.difficulty);
+  self.postMessage({move:r.move, depth:r.depth, score:r.score, pv:r.pv});
 };`;
 const aiWorker = new Worker(URL.createObjectURL(
   new Blob([CORE_SRC + workerGlue], {type:'application/javascript'})
@@ -532,6 +561,7 @@ let cell=60, ox=0, oy=0, DPR=1, BW=0;
 let game, history, selected, anim, thinking;
 let difficulty='medium', humanPlayer=0, aiPlayer=1, busy=false;
 let gameLog=null, allLogs=[];
+let lastAIDiag=null; // {depth,score,pv} from the worker for the AI's pending move
 function updateLogDisplay(){
   document.getElementById('logLabel').textContent='נתוני '+allLogs.length+' משחקים לניתוח';
   document.getElementById('logOut').value=JSON.stringify(allLogs);
@@ -753,7 +783,7 @@ function stepAnim(now){
 /* ---- flow ---- */
 function newGame(){
   game=initState(); game.toMove=(humanPlayer===0)?0:0;
-  history=[]; selected=null; anim=null; busy=false;
+  history=[]; selected=null; anim=null; busy=false; lastAIDiag=null;
   gameLog={d:difficulty,h:humanPlayer,moves:[],snaps:{'0':encodeBoard(game)}};
   document.getElementById('overlay').classList.remove('show');
   updateStatus(); render();
@@ -771,10 +801,18 @@ function updateStatus(){
 }
 function execute(m){
   if(gameLog){
-    gameLog.moves.push({by:game.toMove===humanPlayer?'h':'a',...encodeMove(m)});
-    const n=gameLog.moves.length;
-    if(n%6===0) gameLog.snaps[n]=encodeBoard(game);
+    const isAI = game.toMove!==humanPlayer;
+    const entry={by:isAI?'a':'h', ...encodeMove(m)};
+    // attach engine diagnostics to AI moves: depth reached, eval (AI's POV), expected line
+    if(isAI && lastAIDiag){
+      entry.dep=lastAIDiag.depth;
+      entry.ev=lastAIDiag.score;
+      entry.pv=(lastAIDiag.pv||[]).map(encodeMove);
+    }
+    gameLog.moves.push(entry);
+    gameLog.snaps[gameLog.moves.length]=encodeBoard(game); // position the mover faced (pre-move)
   }
+  lastAIDiag=null;
   const pre=game;
   game=applyMove(pre,m);
   startAnim(pre,m,()=>{ postMove(); });
@@ -795,8 +833,16 @@ function aiTurn(){
   history.push(cloneState(game));
   aiWorker.onmessage=(e)=>{
     const m=e.data.move;
+    lastAIDiag={depth:e.data.depth, score:e.data.score, pv:e.data.pv};
     const wait=Math.max(0, 80 - (performance.now()-t0));
-    setTimeout(()=>{ document.getElementById('thinking').textContent=''; if(m) execute(m); else { game.winner=humanPlayer; showWin(); } }, wait);
+    setTimeout(()=>{
+      // live readout: how deep the bot searched + how it rates the position (its POV)
+      const sc=e.data.score;
+      const scTxt = Math.abs(sc)>=1e6 ? (sc>0?'ניצחון נראה לעין':'סכנת הפסד')
+                  : (sc>0?'+':'')+sc;
+      document.getElementById('thinking').textContent = m ? ('עומק '+e.data.depth+' · הערכה '+scTxt) : '';
+      if(m) execute(m); else { game.winner=humanPlayer; showWin(); }
+    }, wait);
   };
   aiWorker.postMessage({state:game, difficulty});
 }
@@ -889,6 +935,22 @@ document.getElementById('clearLogBtn').addEventListener('click',()=>{
   allLogs=[];
   document.getElementById('logWrap').style.display='none';
 });
+
+/* ---- console diagnostics ---- */
+// Load any logged board string into the live game: octiLoad("12,12:...", toMove)
+window.octiLoad=(boardStr,toMove)=>{
+  game=decodeBoard(boardStr,toMove||0); selected=null; anim=null; busy=false;
+  document.getElementById('overlay').classList.remove('show');
+  updateStatus(); render(); return game;
+};
+// Ask the engine what it plays in a given position, with full diagnosis:
+// octiAnalyze("12,12:...", toMove, 'hard') -> {move, depth, score, eval, pv}
+window.octiAnalyze=(boardStr,toMove,diff)=>{
+  const st=decodeBoard(boardStr,toMove||0);
+  const r=globalThis.OCTI.pickMove(st,diff||'hard');
+  return {move:r.move, depth:r.depth, score:r.score,
+          eval:globalThis.OCTI.evaluate(st), pv:(r.pv||[]).map(encodeMove)};
+};
 
 window.addEventListener('resize',()=>{ layout(); render(); });
 layout(); newGame();
