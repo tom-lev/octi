@@ -272,58 +272,71 @@ function evaluate(s){
       const dy=DIRS[d][1], up=(isMe?p:q)===0;
       if(up?dy<0:dy>0) fwd++; else if(dy===0) lat++;
     }
-    const total=popcount(pod.prongs), pv=fwd*3+lat;
+    const total=popcount(pod.prongs);
     if(isMe){
-      myPods++; score+=pv*8;
+      myPods++;
       if(total>0){
-        const d=chebToHome(i,HOME[q]); score+=(7-d)*12;
+        const d=chebToHome(i,HOME[q]);
+        // Super-linear concentration reward: stacking fwd prongs on one pod is exponentially better
+        score += fwd*fwd*10 + fwd*14 + lat*4;
+        // Proximity + prong×proximity synergy (advanced armed pod = huge threat)
+        score += (7-d)*14 + (7-d)*fwd*7;
         // Check if pod can reach enemy home via a jump sequence (counts as TTW=1)
         const js=genJumps(b,i,pod.prongs);
         const jumpWin=js.some(j=>HOME_SET[q].has(j.to));
         const ttw=jumpWin?1:(fwd>0?d:(s.reserve[p]>0?d+1:99));
         if(ttw<myMinTTW)myMinTTW=ttw; if(ttw<=3)myThreats++;
       } else if(s.reserve[p]>0){
+        score += (7-chebToHome(i,HOME[q]))*5;
         const ttw=chebToHome(i,HOME[q])+1;
         if(ttw<myMinTTW)myMinTTW=ttw;
       }
     } else {
-      opPods++; score-=pv*8;
+      opPods++;
       if(total>0){
-        const d=chebToHome(i,HOME[p]); score-=(7-d)*12;
+        const d=chebToHome(i,HOME[p]);
+        score -= fwd*fwd*10 + fwd*14 + lat*4;
+        score -= (7-d)*14 + (7-d)*fwd*7;
         const js=genJumps(b,i,pod.prongs);
         const jumpWin=js.some(j=>HOME_SET[p].has(j.to));
         const ttw=jumpWin?1:(fwd>0?d:(s.reserve[q]>0?d+1:99));
         if(ttw<opMinTTW)opMinTTW=ttw; if(ttw<=3)opThreats++;
       } else if(s.reserve[q]>0){
+        score -= (7-chebToHome(i,HOME[p]))*5;
         const ttw=chebToHome(i,HOME[p])+1;
         if(ttw<opMinTTW)opMinTTW=ttw;
       }
     }
   }
-  score+=7*(s.reserve[p]-s.reserve[q]);
-  score+=70*(myPods-opPods);
-  score+=45*(myThreats-opThreats);
+  score+=8*(s.reserve[p]-s.reserve[q]);
+  score+=60*(myPods-opPods);
+  score+=50*(myThreats-opThreats);
   // Race: turns-to-win gap is the dominant strategic factor
-  if(myMinTTW<99&&opMinTTW<99) score+=180*(opMinTTW-myMinTTW);
-  else if(myMinTTW<99) score+=180*(7-myMinTTW);
-  else if(opMinTTW<99) score-=180*(7-opMinTTW);
-  if(myMinTTW<=1) score+=800; if(opMinTTW<=1) score-=950;
-  if(myMinTTW<=2) score+=300; if(opMinTTW<=2) score-=380;
+  if(myMinTTW<99&&opMinTTW<99) score+=220*(opMinTTW-myMinTTW);
+  else if(myMinTTW<99) score+=220*(6-myMinTTW);
+  else if(opMinTTW<99) score-=220*(6-opMinTTW);
+  if(myMinTTW<=1) score+=900; if(opMinTTW<=1) score-=1050;
+  if(myMinTTW<=2) score+=350; if(opMinTTW<=2) score-=430;
   return score;
 }
 function moveOrderKey(s, m){
-  const p=s.toMove;
+  const p=s.toMove, b=s.board;
   if((m.type==='move'||m.type==='jump')&&HOME_SET[1-p].has(m.to)) return 3000;
   if(m.type==='jump'){
-    let cap=0; for(const mi of m.jumped){const t=s.board[mi];if(t&&t.player!==p)cap++;}
+    let cap=0; for(const mi of m.jumped){const t=b[mi];if(t&&t.player!==p)cap++;}
     return 1000+cap*150+m.jumped.length*20;
   }
   if(m.type==='move'){
     const d0=chebToHome(m.from,HOME[1-p]),d1=chebToHome(m.to,HOME[1-p]);
     return 300+(d0-d1)*80;
   }
+  // add prong: prefer forward prongs on pods that are already advanced and armed
   const dy=DIRS[m.dir][1],up=p===0;
-  return (up?dy<0:dy>0)?100:25;
+  const isFwd=(up?dy<0:dy>0);
+  if(!isFwd) return 20;
+  const d=chebToHome(m.from,HOME[1-p]);
+  const armed=popcount(b[m.from].prongs);
+  return 80+(7-d)*18+armed*12;
 }
 let _nc=0;
 function negamax(s, depth, alpha, beta, deadline, allowNull){
@@ -378,13 +391,15 @@ function pickMove(s, difficulty){
   // If opponent can win next move, only search among moves that block the win
   let searchMoves=moves;
   {
+    const myHome=HOME_SET[s.toMove]; // AI's home cells = where opponent wins by landing
     const qt={board:s.board,reserve:s.reserve,toMove:1-s.toMove,winner:null};
     const qms=genMoves(qt);
-    if(qms.some(m=>(m.type==='move'||m.type==='jump')&&HOME_SET[s.toMove].has(m.to))){
+    if(qms.some(m=>(m.type==='move'||m.type==='jump')&&myHome.has(m.to))){
       const blk=moves.filter(m=>{
         const ns=applyMove(s,m);
-        const qt2={board:ns.board,reserve:ns.reserve,toMove:1-ns.toMove,winner:null};
-        return !genMoves(qt2).some(m2=>(m2.type==='move'||m2.type==='jump')&&HOME_SET[ns.toMove].has(m2.to));
+        // Check if opponent (now ns.toMove) can still win in 1 move
+        const qt2={board:ns.board,reserve:ns.reserve,toMove:ns.toMove,winner:null};
+        return !genMoves(qt2).some(m2=>(m2.type==='move'||m2.type==='jump')&&myHome.has(m2.to));
       });
       if(blk.length>0) searchMoves=blk;
     }
