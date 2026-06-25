@@ -317,6 +317,21 @@ function evaluate(s){
   else if(opMinTTW<99) score-=220*(6-opMinTTW);
   if(myMinTTW<=1) score+=900; if(opMinTTW<=1) score-=1050;
   if(myMinTTW<=2) score+=350; if(opMinTTW<=2) score-=430;
+  // Home defense: penalize leaving own HOME cells empty when opponent is nearby
+  for(const h of HOME[p]){
+    if(!b[h]){
+      let nearOpp=99;
+      for(let i=0;i<b.length;i++){
+        if(b[i]&&b[i].player===q){
+          const d=Math.max(Math.abs(cx(i)-cx(h)),Math.abs(cy(i)-cy(h)));
+          if(d<nearOpp)nearOpp=d;
+        }
+      }
+      if(nearOpp<=3) score-=(4-nearOpp)*120;
+    } else if(b[h].player===p){
+      score+=50; // bonus for a pod sitting on own HOME cell as blocker
+    }
+  }
   return score;
 }
 function moveOrderKey(s, m){
@@ -429,18 +444,13 @@ function pickMove(s, difficulty){
     }
     return chosen;
   }
-  // hard
-  const deadline=Date.now()+2000; let chosen=searchMoves[0]; let lastScored=[];
-  for(let d=2;d<=20;d++){
+  // hard: deterministic best move, longer time budget
+  const deadline=Date.now()+4000; let chosen=searchMoves[0];
+  for(let d=2;d<=24;d++){
     const r=bestAtDepth(s,searchMoves,d,deadline);
-    if(r.move){chosen=r.move;lastScored=r.scored;}
+    if(r.move) chosen=r.move;
     if(Date.now()>deadline)break;
     if(Math.abs(r.best)>=WIN_SCORE)break;
-  }
-  if(lastScored.length>0){
-    const bestVal=Math.max(...lastScored.map(o=>o.v));
-    const near=lastScored.filter(o=>o.v>=bestVal-15);
-    return near[(Math.random()*near.length)|0].move;
   }
   return chosen;
 }
