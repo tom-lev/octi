@@ -625,8 +625,12 @@ function pickMove(s, difficulty){
       if(blk.length>0) searchMoves=blk;
     }
   }
-  const budget = difficulty==='easy'?700 : difficulty==='medium'?1200 : 5000;
-  const maxDepth = difficulty==='easy'?10 : difficulty==='medium'?14 : 24;
+  // Difficulty is gated mainly by the depth CAP — that's what decides whether the AI can
+  // "see" the multi-ply chain-jump combos. easy/medium are deliberately too shallow to spot
+  // them (so a human can win), while hard searches deep. The 1-move block/win guards above
+  // still fire at any depth, so even easy won't hang an immediate loss.
+  const budget = difficulty==='easy'?600 : difficulty==='medium'?1000 : 5000;
+  const maxDepth = difficulty==='easy'?4 : difficulty==='medium'?6 : 24;
   const deadline=Date.now()+budget;
   killer.fill(0); history.fill(0);
   searchMoves=searchMoves.slice().sort((a,b)=>moveOrderKey(s,b)-moveOrderKey(s,a));
