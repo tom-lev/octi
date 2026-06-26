@@ -630,11 +630,11 @@ function pickMove(s, difficulty){
   const deadline=Date.now()+budget;
   killer.fill(0); history.fill(0);
   searchMoves=searchMoves.slice().sort((a,b)=>moveOrderKey(s,b)-moveOrderKey(s,a));
-  let chosen=searchMoves[0], reached=0, score=0, lastScored=[];
+  let chosen=searchMoves[0], reached=0, score=0;
   for(let d=2;d<=maxDepth;d++){
     const r=bestAtDepth(s,searchMoves,d,deadline);
     if(r.completed){
-      chosen=r.move; lastScored=r.scored; reached=d; score=r.best;
+      chosen=r.move; reached=d; score=r.best;
       // re-sort root by this depth's scores so the next iteration searches best-first
       r.scored.sort((a,b)=>b.v-a.v);
       searchMoves=r.scored.map(o=>o.move);
@@ -642,13 +642,12 @@ function pickMove(s, difficulty){
     if(Date.now()>deadline)break;
     if(Math.abs(r.best)>=WIN_SCORE)break;
   }
-  let played=chosen;
-  // medium plays slightly imperfectly: random among near-best moves (keeps it beatable)
-  if(difficulty==='medium' && lastScored.length>0){
-    const bestVal=Math.max(...lastScored.map(o=>o.v));
-    const near=lastScored.filter(o=>o.v>=bestVal-40);
-    played=near[(Math.random()*near.length)|0].move;
-  }
+  // All levels play the best move they found; difficulty differs only by search budget
+  // (easy 700ms < medium 1200ms < hard 5000ms). The old "medium picks randomly among
+  // near-best moves" filtered on bestAtDepth's per-move scores, which are UPPER BOUNDS for
+  // every move after the running best (alpha-beta fail-high), so it routinely selected
+  // outright blunders — making medium play worse than easy. Removed.
+  const played=chosen;
   // PV starts with the move actually played, then follows the TT from the resulting position
   const pv = played ? [played, ...extractPV(applyMove(s,played),7)] : [];
   return {move:played, depth:reached, score, pv};
