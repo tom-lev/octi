@@ -160,6 +160,16 @@ function popcount(n){ let c=0; while(n){ n&=n-1; c++; } return c; }
 function homeCells(p){ const y = p===0 ? H-2 : 1; return [idx(1,y),idx(2,y),idx(3,y),idx(4,y)]; }
 const HOME = [homeCells(0), homeCells(1)];
 const HOME_SET = [new Set(HOME[0]), new Set(HOME[1])];
+// Precomputed eval helpers: forward/lateral prong direction masks + Chebyshev-to-home table.
+// DIRS dy: d0..d7 = -1,-1,0,1,1,1,0,-1.  Forward = toward the enemy home row.
+const FWD0 = (1<<0)|(1<<1)|(1<<7); // player 0 attacks "up" (dy<0)
+const FWD1 = (1<<3)|(1<<4)|(1<<5); // player 1 attacks "down" (dy>0)
+const LAT  = (1<<2)|(1<<6);        // dy===0
+const CHEB = [new Int8Array(W*H), new Int8Array(W*H)];
+for(let hh=0; hh<2; hh++) for(let i=0;i<W*H;i++){
+  let best=99; for(const c of HOME[hh]){ const dd=Math.max(Math.abs(cx(i)-cx(c)),Math.abs(cy(i)-cy(c))); if(dd<best)best=dd; }
+  CHEB[hh][i]=best;
+}
 function initState(){
   const board = new Array(W*H).fill(null);
   for(const i of HOME[0]) board[i] = {player:0, prongs:0};
@@ -171,18 +181,20 @@ function cloneState(s){
     reserve:[s.reserve[0],s.reserve[1]], toMove:s.toMove, winner:s.winner };
 }
 function genJumps(board, start, prongs){
-  const work = board.slice(); work[start] = null;
+  // temporarily lift the jumping pod off its square (restored before return) instead of
+  // cloning the whole board — board.slice() here was a major per-node allocation.
+  const saved=board[start]; board[start]=null;
   const results = [];
   function rec(pos, jumpedArr){
     const x = cx(pos), y = cy(pos);
     for(let d=0; d<8; d++){
       if(!(prongs & (1<<d))) continue;
       const dx=DIRS[d][0], dy=DIRS[d][1];
-      const mx=x+dx, my=y+dy, lx=x+2*dx, ly=y+2*dy;
+      const lx=x+2*dx, ly=y+2*dy;
       if(!inB(lx,ly)) continue;
-      const mi=idx(mx,my), li=idx(lx,ly);
-      if(work[mi]===null) continue;
-      if(work[li]!==null) continue;
+      const mi=idx(x+dx,y+dy), li=idx(lx,ly);
+      if(board[mi]===null) continue;
+      if(board[li]!==null) continue;
       if(jumpedArr.indexOf(mi)!==-1) continue;
       const nextArr = jumpedArr.concat(mi);
       results.push({ to: li, jumped: nextArr });
@@ -190,6 +202,7 @@ function genJumps(board, start, prongs){
     }
   }
   rec(start, []);
+  board[start]=saved;
   return results;
 }
 function genMoves(s){
@@ -230,6 +243,32 @@ function applyMove(s, m){
 }
 /* ---- AI ---- */
 const WIN_SCORE = 1e7;
+// In-place make/unmake for the search hot path: mutates the state instead of cloning 42
+// objects per node (the old cloneState was the dominant cost). Returns capture-undo info.
+// Pairs strictly: every makeMove(s,m) must be followed by unmakeMove(s,m,info).
+function makeMove(s, m){
+  const b=s.board, p=s.toMove; let caps=null;
+  if(m.type==='add'){ b[m.from].prongs |= (1<<m.dir); s.reserve[p]-=1; }
+  else if(m.type==='move'){ b[m.to]=b[m.from]; b[m.from]=null; }
+  else{ // jump
+    const pod=b[m.from]; b[m.from]=null;
+    for(const mi of m.jumped){ const t=b[mi]; if(t && t.player!==p){ (caps||(caps=[])).push(mi,t); s.reserve[p]+=popcount(t.prongs); b[mi]=null; } }
+    b[m.to]=pod;
+  }
+  if((m.type==='move'||m.type==='jump') && HOME_SET[1-p].has(m.to)) s.winner=p;
+  s.toMove=1-p;
+  return caps;
+}
+function unmakeMove(s, m, caps){
+  if(s.winner!==null) s.winner=null; // only our move could have set it (we never recurse into won nodes)
+  s.toMove=1-s.toMove; const p=s.toMove, b=s.board;
+  if(m.type==='add'){ b[m.from].prongs &= ~(1<<m.dir); s.reserve[p]+=1; }
+  else if(m.type==='move'){ b[m.from]=b[m.to]; b[m.to]=null; }
+  else{
+    const pod=b[m.to]; b[m.to]=null; b[m.from]=pod;
+    if(caps) for(let k=0;k<caps.length;k+=2){ const mi=caps[k], t=caps[k+1]; b[mi]=t; s.reserve[p]-=popcount(t.prongs); }
+  }
+}
 // Zobrist table: 42 cells * 2 players * 256 prong combos + reserves + turn
 const ZR=(function(){
   const t=new Int32Array(42*512+28);
@@ -243,7 +282,10 @@ const tt_key=new Int32Array(TT_SIZE);
 const tt_dep=new Int8Array(TT_SIZE);
 const tt_scr=new Int32Array(TT_SIZE);
 const tt_flg=new Uint8Array(TT_SIZE); // 0=exact,1=lower,2=upper
-const tt_mv=new Int32Array(TT_SIZE);  // best move (packed, +1) for PV extraction / diagnosis
+const tt_mv=new Int32Array(TT_SIZE);  // best move (packed, +1) for PV extraction / ordering
+// Move-ordering heuristics (cleared each pickMove): killers per ply + history by move code
+const killer=new Int32Array(64*2);    // 2 killer moves (mvCode+1) per remaining-depth
+const history=new Int32Array(1<<14);  // history score, indexed by mvCode
 function zhash(s){
   let h=s.toMove?ZR[ZR.length-1]:0;
   for(let i=0;i<s.board.length;i++){
@@ -254,10 +296,24 @@ function zhash(s){
   h^=ZR[42*512+13+s.reserve[1]];
   return h;
 }
-function chebToHome(i, home){
-  const x=cx(i), y=cy(i); let best=99;
-  for(const h of home){ const d=Math.max(Math.abs(x-cx(h)),Math.abs(y-cy(h))); if(d<best)best=d; }
-  return best;
+function chebToHome(i, homeIdx){ return CHEB[homeIdx][i]; } // homeIdx is 0|1 (table lookup)
+// Cheap one-hop "can this pod jump straight onto an enemy home cell?" — replaces the
+// expensive recursive genJumps() that used to run inside evaluate() for every armed pod.
+// (Multi-hop jump-wins are still found by the real search; eval only needs the common case.)
+function jumpsHome(b, i, prongs, homeSet){
+  const x=cx(i), y=cy(i);
+  for(let d=0;d<8;d++){
+    if(!(prongs&(1<<d))) continue;
+    const dx=DIRS[d][0], dy=DIRS[d][1];
+    const lx=x+2*dx, ly=y+2*dy;
+    if(!inB(lx,ly)) continue;
+    const li=idx(lx,ly);
+    if(!homeSet.has(li)) continue;
+    if(b[idx(x+dx,y+dy)]===null) continue; // need a pod to vault over
+    if(b[li]!==null) continue;              // landing must be empty
+    return true;
+  }
+  return false;
 }
 function evaluate(s){
   if(s.winner!==null) return s.winner===s.toMove ? WIN_SCORE : -WIN_SCORE;
@@ -267,47 +323,43 @@ function evaluate(s){
   let myTTW1=0, myTTW2=0, opTTW1=0, opTTW2=0;
   for(let i=0;i<b.length;i++){
     const pod=b[i]; if(!pod) continue;
-    const isMe=pod.player===p;
-    let fwd=0, lat=0;
-    for(let d=0;d<8;d++){
-      if(!(pod.prongs&(1<<d))) continue;
-      const dy=DIRS[d][1], up=(isMe?p:q)===0;
-      if(up?dy<0:dy>0) fwd++; else if(dy===0) lat++;
-    }
-    const total=popcount(pod.prongs);
+    const owner=pod.player, isMe=owner===p, pr=pod.prongs;
+    const fwd=popcount(pr & (owner===0?FWD0:FWD1));
+    const lat=popcount(pr & LAT);
+    const total=popcount(pr);
     if(isMe){
       myPods++;
       if(total>0){
-        const d=chebToHome(i,HOME[q]);
+        const d=CHEB[q][i];
         // Super-linear concentration reward: stacking fwd prongs on one pod is exponentially better
         score += fwd*fwd*10 + fwd*14 + lat*4;
         // Proximity + prong×proximity synergy (advanced armed pod = huge threat)
         score += (7-d)*14 + (7-d)*fwd*7;
         // Check if pod can reach enemy home via a jump sequence (counts as TTW=1)
-        const js=genJumps(b,i,pod.prongs);
-        const jumpWin=js.some(j=>HOME_SET[q].has(j.to));
+        const jumpWin=jumpsHome(b,i,pr,HOME_SET[q]);
         const ttw=jumpWin?1:(fwd>0?d:(s.reserve[p]>0?d+1:99));
         if(ttw<myMinTTW)myMinTTW=ttw;
         if(ttw<=1){myTTW1++;myThreats++;}else if(ttw<=2){myTTW2++;myThreats++;}else if(ttw<=3)myThreats++;
       } else if(s.reserve[p]>0){
-        score += (7-chebToHome(i,HOME[q]))*5;
-        const ttw=chebToHome(i,HOME[q])+1;
+        const d=CHEB[q][i];
+        score += (7-d)*5;
+        const ttw=d+1;
         if(ttw<myMinTTW)myMinTTW=ttw;
       }
     } else {
       opPods++;
       if(total>0){
-        const d=chebToHome(i,HOME[p]);
+        const d=CHEB[p][i];
         score -= fwd*fwd*10 + fwd*14 + lat*4;
         score -= (7-d)*14 + (7-d)*fwd*7;
-        const js=genJumps(b,i,pod.prongs);
-        const jumpWin=js.some(j=>HOME_SET[p].has(j.to));
+        const jumpWin=jumpsHome(b,i,pr,HOME_SET[p]);
         const ttw=jumpWin?1:(fwd>0?d:(s.reserve[q]>0?d+1:99));
         if(ttw<opMinTTW)opMinTTW=ttw;
         if(ttw<=1){opTTW1++;opThreats++;}else if(ttw<=2){opTTW2++;opThreats++;}else if(ttw<=3)opThreats++;
       } else if(s.reserve[q]>0){
-        score -= (7-chebToHome(i,HOME[p]))*5;
-        const ttw=chebToHome(i,HOME[p])+1;
+        const d=CHEB[p][i];
+        score -= (7-d)*5;
+        const ttw=d+1;
         if(ttw<opMinTTW)opMinTTW=ttw;
       }
     }
@@ -368,7 +420,7 @@ function moveOrderKey(s, m){
     return 1000+cap*150+m.jumped.length*20;
   }
   if(m.type==='move'){
-    const d0=chebToHome(m.from,HOME[1-p]),d1=chebToHome(m.to,HOME[1-p]);
+    const d0=chebToHome(m.from,1-p),d1=chebToHome(m.to,1-p);
     // Bonus for reinforcing an empty own-home cell — critical defensive priority
     const defBonus=HOME_SET[p].has(m.to)&&!b[m.to]?160:0;
     return 300+(d0-d1)*80+defBonus;
@@ -377,7 +429,7 @@ function moveOrderKey(s, m){
   const dy=DIRS[m.dir][1],up=p===0;
   const isFwd=(up?dy<0:dy>0);
   if(!isFwd) return 20;
-  const d=chebToHome(m.from,HOME[1-p]);
+  const d=chebToHome(m.from,1-p);
   const armed=popcount(b[m.from].prongs);
   return 80+(7-d)*18+armed*12;
 }
@@ -397,9 +449,10 @@ function quiesce(s,alpha,beta,deadline){
   if(!moves.length) return alpha;
   moves.sort((a,b)=>moveOrderKey(s,b)-moveOrderKey(s,a));
   for(const m of moves){
-    const ns=applyMove(s,m);
-    if(ns.winner===p) return WIN_SCORE; // immediate win found
-    const val=-quiesce(ns,-beta,-alpha,deadline);
+    const caps=makeMove(s,m);
+    if(s.winner!==null){ unmakeMove(s,m,caps); return WIN_SCORE; } // immediate win found
+    const val=-quiesce(s,-beta,-alpha,deadline);
+    unmakeMove(s,m,caps);
     if(val>=beta) return beta;
     if(val>alpha) alpha=val;
   }
@@ -415,12 +468,14 @@ function negamax(s, depth, alpha, beta, deadline, allowNull){
   if(depth===0) return quiesce(s,alpha,beta,deadline);
   if(!(++_nc&1023)&&Date.now()>deadline) return evaluate(s);
   const h=zhash(s), slot=(h>>>0)&(TT_SIZE-1), origAlpha=alpha;
-  if(tt_key[slot]===h&&tt_dep[slot]>=depth){
+  const ttHit=tt_key[slot]===h;
+  if(ttHit&&tt_dep[slot]>=depth){
     const f=tt_flg[slot],sc=tt_scr[slot];
     if(f===0) return sc;
     if(f===1){if(sc>alpha)alpha=sc;}else{if(sc<beta)beta=sc;}
     if(alpha>=beta) return sc;
   }
+  const ttMoveCode=ttHit?tt_mv[slot]:0; // best move from a prior search of this position
   // Null move pruning: only at depth>=6 to avoid pruning critical defensive responses
   if(allowNull&&depth>=6&&beta<WIN_SCORE/2){
     const R=depth>=8?3:2;
@@ -429,14 +484,42 @@ function negamax(s, depth, alpha, beta, deadline, allowNull){
   }
   let moves=genMoves(s);
   if(moves.length===0) return -WIN_SCORE-depth;
-  moves.sort((a,b)=>moveOrderKey(s,b)-moveOrderKey(s,a));
-  let best=-Infinity, bestMove=null;
+  // Dynamic move ordering: TT move first, then killers, then history, atop the static key.
+  const dk=depth*2, k0=killer[dk], k1=killer[dk+1];
   for(const m of moves){
-    const ns=applyMove(s,m);
-    const val=(ns.winner===s.toMove)?(WIN_SCORE+depth):-negamax(ns,depth-1,-beta,-alpha,deadline,true);
+    const c=mvCode(m); let sc=moveOrderKey(s,m);
+    if(c+1===ttMoveCode) sc+=1000000;
+    else if(c+1===k0||c+1===k1) sc+=8000;
+    const hv=history[c]; if(hv) sc+=hv<4000?hv:4000;
+    m._o=sc;
+  }
+  moves.sort((a,b)=>b._o-a._o);
+  let best=-Infinity, bestMove=null, mi=0;
+  for(const m of moves){
+    const caps=makeMove(s,m);
+    let val;
+    if(s.winner!==null) val=WIN_SCORE+depth; // our move won
+    else if(mi===0){
+      val=-negamax(s,depth-1,-beta,-alpha,deadline,true); // first (best-ordered) move: full window
+    } else {
+      // PVS + LMR: probe later moves with a null window (and reduced depth for late 'add's);
+      // only re-search at full depth/window if the probe unexpectedly beats alpha.
+      let red=0;
+      if(depth>=3 && mi>=4 && m.type==='add' && best>-WIN_SCORE/2) red = mi>=10?2:1;
+      val=-negamax(s,depth-1-red,-alpha-1,-alpha,deadline,true);
+      if(val>alpha && (red>0 || val<beta)) val=-negamax(s,depth-1,-beta,-alpha,deadline,true);
+    }
+    unmakeMove(s,m,caps);
     if(val>best){best=val;bestMove=m;}
     if(best>alpha)alpha=best;
-    if(alpha>=beta)break;
+    if(alpha>=beta){
+      // remember the move that caused this cutoff so siblings try it earlier
+      const c=mvCode(m);
+      if(c+1!==k0){ killer[dk+1]=k0; killer[dk]=c+1; }
+      history[c]+=depth*depth;
+      break;
+    }
+    mi++;
   }
   tt_key[slot]=h; tt_dep[slot]=depth; tt_scr[slot]=best;
   tt_flg[slot]=best<=origAlpha?2:best>=beta?1:0;
@@ -444,7 +527,7 @@ function negamax(s, depth, alpha, beta, deadline, allowNull){
   return best;
 }
 function bestAtDepth(s, moves, depth, deadline){
-  moves=moves.slice().sort((a,b)=>moveOrderKey(s,b)-moveOrderKey(s,a));
+  // moves arrive pre-ordered by the caller (TT/previous-iteration order) — don't re-sort
   let best=-Infinity,bestMove=moves[0],alpha=-Infinity; const scored=[]; let completed=true;
   for(const m of moves){
     const ns=applyMove(s,m);
@@ -512,14 +595,20 @@ function pickMove(s, difficulty){
       if(blk.length>0) searchMoves=blk;
     }
   }
-  const budget = difficulty==='easy'?700 : difficulty==='medium'?1200 : 4000;
+  const budget = difficulty==='easy'?700 : difficulty==='medium'?1200 : 5000;
   const maxDepth = difficulty==='easy'?10 : difficulty==='medium'?14 : 24;
   const deadline=Date.now()+budget;
+  killer.fill(0); history.fill(0);
+  searchMoves=searchMoves.slice().sort((a,b)=>moveOrderKey(s,b)-moveOrderKey(s,a));
   let chosen=searchMoves[0], reached=0, score=0, lastScored=[];
   for(let d=2;d<=maxDepth;d++){
     const r=bestAtDepth(s,searchMoves,d,deadline);
-    if(r.completed){ chosen=r.move; lastScored=r.scored; reached=d; score=r.best; }
-    else if(r.move){ chosen=r.move; } // partial result: trust the move but not the depth
+    if(r.completed){
+      chosen=r.move; lastScored=r.scored; reached=d; score=r.best;
+      // re-sort root by this depth's scores so the next iteration searches best-first
+      r.scored.sort((a,b)=>b.v-a.v);
+      searchMoves=r.scored.map(o=>o.move);
+    } else if(r.move){ chosen=r.move; } // partial result: trust the move but not the depth
     if(Date.now()>deadline)break;
     if(Math.abs(r.best)>=WIN_SCORE)break;
   }
@@ -530,7 +619,9 @@ function pickMove(s, difficulty){
     const near=lastScored.filter(o=>o.v>=bestVal-40);
     played=near[(Math.random()*near.length)|0].move;
   }
-  return {move:played, depth:reached, score, pv:extractPV(s,8)};
+  // PV starts with the move actually played, then follows the TT from the resulting position
+  const pv = played ? [played, ...extractPV(applyMove(s,played),7)] : [];
+  return {move:played, depth:reached, score, pv};
 }
 return {W,H,DIRS,idx,cx,cy,inB,popcount,HOME,HOME_SET,initState,cloneState,genMoves,applyMove,pickMove,evaluate,decodeBoard};
 })();
