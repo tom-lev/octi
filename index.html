@@ -925,6 +925,17 @@ function layout(){
 }
 function cellCenter(i){ return { x: ox + (cx(i)+0.5)*cell, y: oy + (cy(i)+0.5)*cell }; }
 function dirUnit(d){ const v=DIRS[d]; const L=Math.hypot(v[0],v[1]); return {x:v[0]/L, y:v[1]/L}; }
+// Chess-style coordinates in the frame margin: files A–F along the bottom, ranks 1–7 (bottom→top)
+// down the left side. Drawn only in coach mode so the feedback's square names are easy to locate.
+function drawCoords(){
+  ctx.save();
+  ctx.fillStyle='rgba(231,177,60,.6)';
+  ctx.font='700 '+Math.max(8,Math.min(cell*0.17,13))+'px Heebo,sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  for(let x=0;x<W;x++) ctx.fillText(String.fromCharCode(65+x), ox+(x+0.5)*cell, oy+cell*H+BW*0.5);
+  for(let y=0;y<H;y++) ctx.fillText(String(H-y), ox*0.5, oy+(y+0.5)*cell);
+  ctx.restore();
+}
 function angDelta(a,b){ let d=a-b; while(d>Math.PI)d-=2*Math.PI; while(d<-Math.PI)d+=2*Math.PI; return d; }
 
 function octPath(p, cxp, cyp, r){
@@ -1013,6 +1024,7 @@ function render(){
   for(let r=0;r<=H;r++){ const y=Math.round(oy+r*cell)+.5; ctx.beginPath(); ctx.moveTo(bx,y); ctx.lineTo(bx+bw,y); ctx.stroke(); }
   // board inner shadow edge
   ctx.strokeStyle='rgba(0,0,0,.18)'; ctx.lineWidth=2; ctx.strokeRect(bx+1,by+1,bw-2,bh-2);
+  if(coachOn) drawCoords(); // chess-like A–F / 1–7 labels for the coach's square descriptions
 
   // opponent's last move: soft glow on the involved cells + a gold directional arrow, fading over HL_DUR
   if(lastMove){
@@ -1151,11 +1163,17 @@ function freshCoachStats(){
     hungMoves:0, homeLapses:0, missedForks:0, missedWins:0, captures:0,
     firstArmedMove:0, worstLoss:-1, worstMoveNo:0, crit:null };
 }
-function coachMoveLabel(m){
+// Chess-like square name: columns A–F (x), rows 1–7 from the bottom. e.g. cell (x=2,y=5) → "C2".
+function sq(i){ return String.fromCharCode(65+cx(i))+(H-cy(i)); }
+// Arrow direction as a CLOCK NUMBER relative to the player's forward: forward=1, then clockwise to 8.
+const DIR_WORD={1:'קדימה',3:'ימינה',5:'אחורה',7:'שמאלה'};
+function dirNum(d,player){ const fwd=(player===0)?0:4; return ((d-fwd+8)%8)+1; }
+function dirLabel(d,player){ const n=dirNum(d,player); return 'כיוון '+n+(DIR_WORD[n]?' ('+DIR_WORD[n]+')':''); }
+function coachMoveLabel(m, player){
   if(!m) return '';
-  if(m.type==='add')  return 'להוסיף חץ '+(DIR_ARROW[m.dir]||'');
-  if(m.type==='move') return 'להזיז כלי לעבר הבית של היריב';
-  if(m.type==='jump') return 'לקפוץ (קפיצת שרשרת)';
+  if(m.type==='add')  return 'להוסיף חץ '+dirLabel(m.dir,player)+' לכלי שב-'+sq(m.from);
+  if(m.type==='move') return 'להזיז את הכלי מ-'+sq(m.from)+' ל-'+sq(m.to);
+  if(m.type==='jump') return 'לקפוץ עם הכלי שב-'+sq(m.from)+' (לכידה)';
   return '';
 }
 // fire while it's YOUR turn — the result is ready by the time you move (latency hidden)
@@ -1229,11 +1247,11 @@ function coachScoreMove(prevState, move, pre, oppScore){
   const why = bestView ? coachWhy(after, bestView) : [];
   const whyTxt = why.length ? why.join(' · ')
     : (loss>60 ? 'מוותר על ~'+Math.round(loss)+' נק׳ הערכה (טקטיקה עמוקה יותר)' : '');
-  const better = 'עדיף '+coachMoveLabel(pre.bestMove)+(whyTxt?' — '+whyTxt:'');
+  const better = 'עדיף '+coachMoveLabel(pre.bestMove,humanPlayer)+(whyTxt?' — '+whyTxt:'');
   // live tip — most important issue first
   let tip, sub='';
-  if(winAvail && loss>300){ tip='פספסת ניצחון כפוי!'; sub='היה מהלך שמוביל לזכייה: '+coachMoveLabel(pre.bestMove)+(whyTxt?' — '+whyTxt:''); }
-  else if(forkAvail && !youForked){ tip='פספסת מזלג 🍴'; sub=coachMoveLabel(pre.bestMove)+' היה יוצר שני איומים בו-זמנית שאי אפשר לחסום את שניהם'; }
+  if(winAvail && loss>300){ tip='פספסת ניצחון כפוי!'; sub='היה מהלך שמוביל לזכייה: '+coachMoveLabel(pre.bestMove,humanPlayer)+(whyTxt?' — '+whyTxt:''); }
+  else if(forkAvail && !youForked){ tip='פספסת מזלג 🍴'; sub=coachMoveLabel(pre.bestMove,humanPlayer)+' היה יוצר שני איומים בו-זמנית שאי אפשר לחסום את שניהם'; }
   else if(quality==='blunder'){ tip='טעות'; sub=better; }
   else if(after.myCapturable>before.myCapturable){ tip='השארת כלי חשוף'; sub='היריב יכול ללכוד אותו בקפיצה אחת. '+better; }
   else if(quality==='inacc'){ tip='לא מדויק'; sub=better; }
@@ -1255,7 +1273,7 @@ function coachScoreMove(prevState, move, pre, oppScore){
   const costPct = coachWinPct(pre.refValue) - pct;
   if(costPct>=3 && (!cs.crit || costPct>cs.crit.cost)){
     cs.crit={ cost:costPct, moveNo:cs.n, board:encodeBoard(prevState),
-      best:coachMoveLabel(pre.bestMove), why:whyTxt,
+      best:coachMoveLabel(pre.bestMove,humanPlayer), why:whyTxt,
       pctBefore:coachWinPct(pre.refValue), pctAfter:pct };
   }
   coachLast={quality,loss,tip,sub,pct,delta}; coachHint=null;
@@ -1276,7 +1294,7 @@ function coachWhy(after, bestView){
   if(after.myCapturable > bestView.myCapturable) r.push('לא חושף כלי שלך לקפיצה (המהלך שלך חשף)');
   if(after.opMinTTW < bestView.opMinTTW) r.push('מונע מהיריב להתקרב לבית שלך');
   if(after.myHomeOpen > bestView.myHomeOpen) r.push('סוגר פרצה בהגנת הבית שלך');
-  if(bestView.myFwdArmed > after.myFwdArmed) r.push('מצייד כלי בחץ קדימה — מאפשר לו לתקוף');
+  if(bestView.myFwdArmed > after.myFwdArmed) r.push('מצייד כלי בחץ קדימה (מכין אותו להתקפה)');
   else if(bestView.myInitiative > after.myInitiative+1) r.push('מקדם כלי חמוש קדימה (יוזמה)');
   return r.slice(0,2);
 }
@@ -1352,9 +1370,9 @@ function coachReport(){
   if(cs.crit){
     const cr=cs.crit;
     html+='<div class="coach-crit">'
-      +'<div class="ch">⚡ הרגע הקריטי — מהלך '+cr.moveNo+'</div>'
+      +'<div class="ch">⚡ הרגע הקריטי — המהלך ה-'+cr.moveNo+' שלך</div>'
       +'<div class="cd">סיכוי הניצחון שלך צנח מ-'+cr.pctBefore+'% ל-'+cr.pctAfter+'% (−'+cr.cost+').</div>'
-      +'<div class="cd">עדיף היה '+cr.best+(cr.why?' — '+cr.why:'')+'.</div>'
+      +'<div class="cd">היה '+cr.best+(cr.why?' — '+cr.why:'')+'.</div>'
       +'<button class="btn coach-replay" id="coachReplayBtn">↺ שחזר את העמדה ונסה שוב</button>'
       +'</div>';
   }
@@ -1710,7 +1728,8 @@ document.getElementById('coachBtn').addEventListener('click',e=>{
   if(coachOn){
     if(!coachStats) coachStats=freshCoachStats();
     if(!busy && !anim && game && game.winner==null && game.toMove===humanPlayer) coachAnalyzePre(game);
-  } else { coachHint=null; coachLast=null; coachPre=null; render(); }
+  } else { coachHint=null; coachLast=null; coachPre=null; }
+  render(); // refresh the board so the A–F / 1–7 coordinate labels appear/disappear
 });
 // tap the mobile bottom sheet to expand/collapse the full explanation
 document.getElementById('coachSide').addEventListener('click',()=>{
