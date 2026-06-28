@@ -78,6 +78,24 @@
   details.rules .body{font-size:13px;line-height:1.7;color:var(--ink-dim);padding:2px 2px 14px;}
   details.rules .body b{color:var(--ink);}
   .thinking{font-size:12px;color:var(--ink-dim);min-height:16px;display:flex;align-items:center;justify-content:center;gap:8px;}
+  /* ---- coach / training mode ---- */
+  .btn.coach-on{background:linear-gradient(180deg,#2e5a3a,#1c3a26);border-color:#5ad08a55;color:#bff0cf;}
+  #coachBar{width:min(94vw,470px);min-height:0;display:flex;flex-direction:column;gap:6px;margin-top:2px;}
+  .coach-card{display:flex;align-items:center;gap:10px;background:#00000026;border:1px solid #ffffff14;
+    border-radius:10px;padding:8px 12px;font-size:13px;animation:coachIn .25s ease-out;}
+  @keyframes coachIn{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:translateY(0);}}
+  .coach-badge{flex:none;width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    font-weight:800;font-size:15px;color:#fff;}
+  .coach-badge.q-best{background:#2fa86a;} .coach-badge.q-good{background:#5aa0d0;}
+  .coach-badge.q-inacc{background:#d6a23a;} .coach-badge.q-blunder{background:#d05a5a;}
+  .coach-tip{flex:1;color:var(--ink);line-height:1.35;}
+  .coach-tip .sub{display:block;font-size:11.5px;color:var(--ink-dim);margin-top:1px;}
+  /* end-of-game training report */
+  .coach-report{margin:4px 0 14px;text-align:right;}
+  .coach-report .row{display:flex;justify-content:space-between;gap:12px;font-size:13px;padding:3px 0;border-bottom:1px solid #ffffff10;}
+  .coach-report .row b{font-weight:800;}
+  .coach-report .tips{margin-top:8px;font-size:12.5px;color:var(--ink-dim);line-height:1.5;text-align:right;}
+  .coach-report .profile{font-size:14px;font-weight:800;margin:8px 0 4px;color:var(--ink);}
   /* animated "thinking" dots */
   .dots{display:inline-flex;gap:3px;}
   .dots i{width:4px;height:4px;border-radius:50%;background:var(--ink-dim);opacity:.35;animation:dotPulse 1.1s infinite ease-in-out;}
@@ -129,6 +147,7 @@
   <div class="controls">
     <button class="btn" id="newBtn">משחק חדש</button>
     <button class="btn" id="undoBtn">ביטול מהלך</button>
+    <button class="btn" id="coachBtn" aria-pressed="false">מאמן 🎯</button>
   </div>
 
   <div class="status">
@@ -147,11 +166,13 @@
         <div class="big" id="winBig"></div>
         <div class="sub" id="winSub"></div>
         <div class="stats" id="winStats"></div>
+        <div id="coachReportBox"></div>
         <button class="btn" id="againBtn">עוד משחק</button>
       </div>
     </div>
   </div>
   <div class="thinking" id="thinking"></div>
+  <div id="coachBar"></div>
   <div class="toast" id="toast"></div>
   <div id="logWrap" style="display:none;width:min(94vw,470px);margin-top:2px;">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
@@ -316,6 +337,10 @@ const tt_mv=new Int32Array(TT_SIZE);  // best move (packed, +1) for PV extractio
 // Move-ordering heuristics (cleared each pickMove): killers per ply + history by move code
 const killer=new Int32Array(64*2);    // 2 killer moves (mvCode+1) per remaining-depth
 const history=new Int32Array(1<<14);  // history score, indexed by mvCode
+// Wipe all search memory. The coach calls this before every search so grading is REPRODUCIBLE:
+// a warm/polluted TT makes pickMove return slightly different scores for the same position, which
+// would make even the engine's own best move grade as a small loss. Not used by gameplay.
+function clearTT(){ tt_key.fill(0); tt_dep.fill(0); tt_scr.fill(0); tt_flg.fill(0); tt_mv.fill(0); killer.fill(0); history.fill(0); }
 function zhash(s){
   let h=s.toMove?ZR[ZR.length-1]:0;
   for(let i=0;i<s.board.length;i++){
@@ -441,6 +466,75 @@ function evaluate(s){
     }
   }
   return score;
+}
+// Coaching-only breakdown of a position. NOT on the search hot path — it re-derives the
+// human-relevant signals that evaluate() throws away as locals, so the trainer can explain
+// *why* a move was good/bad (passivity, missed forks, hung pods) without touching eval
+// semantics. All counts are relative to s.toMove ("my"/"op"). Mirrors evaluate()'s TTW,
+// capturable-pod and home-defense logic exactly.
+function analyzePosition(s){
+  const p=s.toMove, q=1-p, b=s.board;
+  const R={me:p,
+    myMinTTW:99,opMinTTW:99, myThreats:0,opThreats:0,
+    myTTW1:0,myTTW2:0,opTTW1:0,opTTW2:0,
+    myPods:0,opPods:0, myArmed:0,opArmed:0, myFwdArmed:0,opFwdArmed:0,
+    myCapturable:0,opCapturable:0, myHomeOpen:0,opHomeOpen:0,
+    myInitiative:0,opInitiative:0,
+    myReserve:s.reserve[p],opReserve:s.reserve[q]};
+  for(let i=0;i<b.length;i++){
+    const pod=b[i]; if(!pod) continue;
+    const owner=pod.player, isMe=owner===p, pr=pod.prongs;
+    const fwd=popcount(pr & (owner===0?FWD0:FWD1));
+    const total=popcount(pr);
+    const eHome=1-owner;                 // this pod's target home
+    if(total>0){
+      const d=CHEB[eHome][i];            // distance to enemy home
+      const jumpWin=jumpsHome(b,i,pr,HOME_SET[eHome]);
+      const ttw=jumpWin?1:(fwd>0?d:(s.reserve[owner]>0?d+1:99));
+      const adv=CHEB[owner][i]*fwd;      // initiative: advance from own home × forward prongs
+      if(isMe){
+        R.myPods++; R.myArmed++; if(fwd>0)R.myFwdArmed++; R.myInitiative+=adv;
+        if(ttw<R.myMinTTW)R.myMinTTW=ttw;
+        if(ttw<=1){R.myTTW1++;R.myThreats++;}else if(ttw<=2){R.myTTW2++;R.myThreats++;}else if(ttw<=3)R.myThreats++;
+      } else {
+        R.opPods++; R.opArmed++; if(fwd>0)R.opFwdArmed++; R.opInitiative+=adv;
+        if(ttw<R.opMinTTW)R.opMinTTW=ttw;
+        if(ttw<=1){R.opTTW1++;R.opThreats++;}else if(ttw<=2){R.opTTW2++;R.opThreats++;}else if(ttw<=3)R.opThreats++;
+      }
+    } else {                             // unarmed pod: needs a prong first (costs reserve)
+      const d=CHEB[eHome][i];
+      const ttw=s.reserve[owner]>0?d+1:99;
+      if(isMe){ R.myPods++; if(ttw<R.myMinTTW)R.myMinTTW=ttw; }
+      else { R.opPods++; if(ttw<R.opMinTTW)R.opMinTTW=ttw; }
+    }
+  }
+  // one-hop capturable pods (same test as evaluate's capture penalty, both sides)
+  for(let i=0;i<b.length;i++){
+    const pod=b[i]; if(!pod) continue;
+    const victim=pod.player, attacker=1-victim, ix=cx(i), iy=cy(i);
+    for(let d=0;d<8;d++){
+      const dx=DIRS[d][0], dy=DIRS[d][1];
+      const ax=ix-dx, ay=iy-dy; if(!inB(ax,ay)) continue;
+      const ai=idx(ax,ay);
+      if(!b[ai]||b[ai].player!==attacker) continue;
+      if(!(b[ai].prongs&(1<<d))) continue;
+      const lx=ix+dx, ly=iy+dy;
+      if(!inB(lx,ly)||b[idx(lx,ly)]) continue;
+      if(victim===p)R.myCapturable++; else R.opCapturable++;
+      break;
+    }
+  }
+  // empty own-home cells with an enemy within Chebyshev 3 (defensive lapse)
+  for(let side=0;side<2;side++) for(const h of HOME[side]){
+    if(b[h]) continue;
+    let near=99;
+    for(let i=0;i<b.length;i++) if(b[i]&&b[i].player!==side){
+      const dd=Math.max(Math.abs(cx(i)-cx(h)),Math.abs(cy(i)-cy(h)));
+      if(dd<near)near=dd;
+    }
+    if(near<=3){ if(side===p)R.myHomeOpen++; else R.opHomeOpen++; }
+  }
+  return R;
 }
 function moveOrderKey(s, m){
   const p=s.toMove, b=s.board;
@@ -629,8 +723,12 @@ function pickMove(s, difficulty){
   // "see" the multi-ply chain-jump combos. easy/medium are deliberately too shallow to spot
   // them (so a human can win), while hard searches deep. The 1-move block/win guards above
   // still fire at any depth, so even easy won't hang an immediate loss.
-  const budget = difficulty==='easy'?600 : difficulty==='medium'?1000 : 5000;
-  const maxDepth = difficulty==='easy'?4 : difficulty==='medium'?6 : 24;
+  // difficulty can be a string preset OR an explicit {maxDepth,budget} (used by the coach,
+  // which wants a fixed strong depth regardless of the gameplay difficulty knobs).
+  const budget = (typeof difficulty==='object') ? difficulty.budget
+    : difficulty==='easy'?600 : difficulty==='medium'?1000 : 5000;
+  const maxDepth = (typeof difficulty==='object') ? difficulty.maxDepth
+    : difficulty==='easy'?4 : difficulty==='medium'?6 : 24;
   const deadline=Date.now()+budget;
   killer.fill(0); history.fill(0);
   searchMoves=searchMoves.slice().sort((a,b)=>moveOrderKey(s,b)-moveOrderKey(s,a));
@@ -656,12 +754,12 @@ function pickMove(s, difficulty){
   const pv = played ? [played, ...extractPV(applyMove(s,played),7)] : [];
   return {move:played, depth:reached, score, pv};
 }
-return {W,H,DIRS,idx,cx,cy,inB,popcount,HOME,HOME_SET,initState,cloneState,genMoves,applyMove,pickMove,evaluate,decodeBoard};
+return {W,H,DIRS,idx,cx,cy,inB,popcount,HOME,HOME_SET,initState,cloneState,genMoves,applyMove,pickMove,evaluate,analyzePosition,clearTT,decodeBoard};
 })();
 `;
 // run the core (defines globalThis.OCTI without leaking anything), then pull what the UI needs
 eval(CORE_SRC);
-const {W,H,DIRS,idx,cx,cy,inB,popcount,HOME,HOME_SET,initState,cloneState,genMoves,applyMove,decodeBoard} = globalThis.OCTI;
+const {W,H,DIRS,idx,cx,cy,inB,popcount,HOME,HOME_SET,initState,cloneState,genMoves,applyMove,analyzePosition,decodeBoard} = globalThis.OCTI;
 
 /* =================== AI WORKER (off the main thread) =================== */
 const workerGlue = `
@@ -672,6 +770,45 @@ self.onmessage = function(e){
 const aiWorker = new Worker(URL.createObjectURL(
   new Blob([CORE_SRC + workerGlue], {type:'application/javascript'})
 ));
+
+/* =================== COACH WORKER (move grading / training) =================== */
+// A second, independent engine instance used only by the training mode. It never competes
+// with the AI worker: 'pre' runs while YOU think (free latency), 'grade' runs in parallel
+// with the AI's reply (hidden behind its think time). Strong fixed depth — grading just needs
+// to be accurate, not fast. See FINDINGS.md §4: this measures exactly what self-play can't —
+// human passivity and missed chain-jump combos.
+// Grading compares two values computed THE SAME WAY so engine offsets cancel: the value of the
+// engine's best move (refValue, computed here during 'pre') vs the value of your played move
+// ('grade'). Both = your POV after the move, searched to the same depth D-1 with a freshly cleared
+// TT. If you played the best move, refValue and grade match exactly → loss 0.
+const coachGlue = `
+self.onmessage = function(e){
+  const O = globalThis.OCTI, d = e.data;
+  if(d.type==='pre'){
+    O.clearTT();
+    const r = O.pickMove(d.state, {maxDepth:d.maxDepth, budget:d.budget});
+    const gd = Math.max(2,(r.depth||8)-1);
+    let refValue = r.score;
+    if(r.move){ O.clearTT();
+      const g = O.pickMove(O.applyMove(d.state, r.move), {maxDepth:gd, budget:1e9});
+      refValue = -g.score; }
+    self.postMessage({ type:'pre', gen:d.gen, move:r.move, score:r.score, depth:r.depth,
+      pv:r.pv, refValue:refValue, gradeDepth:gd });
+  } else if(d.type==='grade'){
+    O.clearTT();
+    const g = O.pickMove(d.state, {maxDepth:d.maxDepth, budget:d.budget});
+    self.postMessage({ type:'grade', gen:d.gen, score:g.score });
+  }
+};`;
+const coachWorker = new Worker(URL.createObjectURL(
+  new Blob([CORE_SRC + coachGlue], {type:'application/javascript'})
+));
+// Grading strength. The engine realistically reaches ~depth 9-10 in a few seconds (FINDINGS.md),
+// which is already its full "hard" strength and plenty to flag blunders/forks. The depth cap is
+// effectively unreachable — BUDGET is the real knob. Kept short so 'pre' usually completes before
+// you move (hint ready) and 'grade' fits inside the AI's reply time. Raise BUDGET for stronger
+// grading at the cost of the hint/badge sometimes lagging.
+const COACH_DEPTH = 16, COACH_BUDGET = 3000;
 
 /* =================== UI / RENDER =================== */
 const cv = document.getElementById('cv');
@@ -689,6 +826,13 @@ let difficulty='medium', humanPlayer=0, aiPlayer=1, busy=false;
 let gameLog=null, allLogs=[];
 let lastAIDiag=null; // {depth,score,pv} from the worker for the AI's pending move
 let stats=null;      // per-game tallies: {moves, caps:[byHuman?, ...]} indexed by player
+// ---- coach / training mode state ----
+let coachOn=false;       // toggle
+let coachGen=0;          // bumped on undo/newGame; stale worker replies are ignored
+let coachPre=null;       // {bestMove,bestScore,depth,pv,breakdown} for the position you face now
+let coachHint=null;      // best move to draw as a faint hint arrow while you think
+let coachLast=null;      // {quality,loss,tip,sub} for the badge after your last move
+let coachStats=null;     // per-game accumulation (see newGame)
 let lastMove=null, lastMoveT0=0, hlRAF=0; // opponent's last move highlight (glowing rings)
 const HL_DUR=1200;
 let particles=[], fxRAF=0; // fx-canvas particle system (capture sparkles, +N text, confetti)
@@ -858,6 +1002,8 @@ function render(){
     drawPod(c.x,c.y,pod.player,pod.prongs,{alpha});
   }
 
+  drawCoachHint(); // faint green "best move" suggestion while you think (training mode)
+
   // selection + hints (only when human's turn, not animating)
   if(selected!=null && !anim && game.toMove===humanPlayer){
     const c=cellCenter(selected);
@@ -938,6 +1084,194 @@ function drawHLArrowDir(c, dir, a){
   ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(ex,ey); ctx.stroke();
   arrowHead(ex,ey,Math.atan2(u.y,u.x),cell*0.22,a);
   ctx.restore();
+}
+
+/* =================== COACH / TRAINING MODE =================== */
+// Reuses the engine as a coach: grades each of YOUR moves vs the engine's best, and reads the
+// position breakdown (analyzePosition) to explain the WHY — passivity, missed forks, hung pods.
+// See FINDINGS.md §4: engine-vs-engine can't measure these human-specific failure modes; this can.
+const COACH_WIN = 4000;       // pre.bestScore above this ≈ a (near-)forced win was on the table
+const DIR_ARROW = ['↑','↗','→','↘','↓','↙','←','↖'];
+let coachGradeCtx = null;     // {gen,prevState,move,pre} for the grade request in flight
+function humanView(state){    // analyze any board from YOUR perspective regardless of side to move
+  return analyzePosition({board:state.board, reserve:state.reserve, toMove:humanPlayer, winner:null});
+}
+function freshCoachStats(){
+  return { n:0, lossSum:0, best:0, good:0, inacc:0, blunder:0,
+    constructive:0, defensive:0, passive:0, initSum:0, oppInitSum:0,
+    hungMoves:0, homeLapses:0, missedForks:0, missedWins:0, captures:0,
+    firstArmedMove:0, worstLoss:-1, worstMoveNo:0 };
+}
+function coachMoveLabel(m){
+  if(!m) return '';
+  if(m.type==='add')  return 'להוסיף חץ '+(DIR_ARROW[m.dir]||'');
+  if(m.type==='move') return 'להזיז כלי לעבר הבית של היריב';
+  if(m.type==='jump') return 'לקפוץ (קפיצת שרשרת)';
+  return '';
+}
+// fire while it's YOUR turn — the result is ready by the time you move (latency hidden)
+function coachAnalyzePre(state){
+  if(!coachOn) return;
+  coachPre=null; coachHint=null;
+  coachWorker.postMessage({type:'pre', gen:coachGen,
+    state:cloneState(state), maxDepth:COACH_DEPTH, budget:COACH_BUDGET});
+}
+// fire the instant you move — runs in parallel with the AI's reply (latency hidden)
+function coachGradeMove(prevState, move, newState){
+  if(!coachOn || !coachPre) return;          // need the pre-analysis to compare against
+  coachGradeCtx={gen:coachGen, prevState, move, pre:coachPre};
+  coachHint=null;
+  coachLast={quality:'pending', tip:'מנתח…', sub:''}; renderCoachBadge();
+  // Grade the played move at the SAME depth used for refValue (pre.gradeDepth = pre.depth-1),
+  // with a freshly cleared TT (the worker does that). Fixed depth + no deadline = exact, so a
+  // best move grades to loss 0. The depth cap terminates the loop → no hang risk.
+  coachWorker.postMessage({type:'grade', gen:coachGen,
+    state:cloneState(newState), maxDepth:coachPre.gradeDepth, budget:1e9});
+}
+coachWorker.onmessage = (e)=>{
+  const d=e.data;
+  if(d.gen!==coachGen) return;               // stale reply (undo / new game)
+  if(d.type==='pre'){
+    coachPre={bestMove:d.move, bestScore:d.score, depth:d.depth, pv:d.pv,
+              refValue:d.refValue, gradeDepth:d.gradeDepth};
+    if(coachOn && !busy && !anim && game.winner==null && game.toMove===humanPlayer){
+      coachHint=d.move; render();
+    }
+  } else if(d.type==='grade'){
+    const ctx=coachGradeCtx; coachGradeCtx=null;
+    if(ctx && ctx.gen===coachGen) coachScoreMove(ctx.prevState, ctx.move, ctx.pre, d.score);
+  }
+};
+function coachScoreMove(prevState, move, pre, oppScore){
+  // refValue = your-POV value of the engine's best move; -oppScore = your-POV value of the move
+  // you played (oppScore is the opponent's best reply, their POV). Both computed identically
+  // (same depth, cleared TT), so loss = refValue - (-oppScore) = refValue + oppScore.
+  const loss=Math.max(0, pre.refValue + oppScore);
+  const before=humanView(prevState);
+  const after=humanView(applyMove(prevState,move));
+  // what was actually on the table (what the engine would have played)?
+  const winAvail = pre.bestScore>=COACH_WIN;
+  let forkAvail=false;
+  if(pre.bestMove){
+    const bv=humanView(applyMove(prevState,pre.bestMove));
+    forkAvail = bv.myTTW1>=2 || (bv.myTTW1>=1 && bv.myTTW2>=1);
+  }
+  const youForked = after.myTTW1>=2 || (after.myTTW1>=1 && after.myTTW2>=1);
+  // move quality from the centipawn-style loss
+  let quality;
+  if(loss<=40) quality='best'; else if(loss<=120) quality='good';
+  else if(loss<=300) quality='inacc'; else quality='blunder';
+  // behavioural read of the move
+  const advanced=after.myMinTTW<before.myMinTTW, createdThreat=after.myThreats>before.myThreats;
+  const captured=before.opPods>after.opPods, initUp=after.myInitiative>before.myInitiative;
+  const reducedExposure=after.myCapturable<before.myCapturable, defendedHome=after.myHomeOpen<before.myHomeOpen;
+  const constructive=advanced||createdThreat||captured||initUp;
+  const defensive=!constructive && (reducedExposure||defendedHome);
+  const passive=!constructive && !defensive;
+  // accumulate (clamp loss so one missed forced-win doesn't nuke the accuracy metric)
+  const cs=coachStats; cs.n++; cs.lossSum+=Math.min(loss,1500); cs[quality]++;
+  cs.initSum+=after.myInitiative; cs.oppInitSum+=after.opInitiative;
+  if(constructive)cs.constructive++; else if(defensive)cs.defensive++; else cs.passive++;
+  if(after.myCapturable>0)cs.hungMoves++;
+  if(after.myHomeOpen>0)cs.homeLapses++;
+  if(captured)cs.captures++;
+  if(forkAvail && !youForked)cs.missedForks++;
+  if(winAvail && loss>300)cs.missedWins++;
+  if(!cs.firstArmedMove && after.myFwdArmed>0)cs.firstArmedMove=cs.n;
+  if(loss>cs.worstLoss){cs.worstLoss=loss; cs.worstMoveNo=cs.n;}
+  // live tip — most important issue first
+  let tip, sub='';
+  if(winAvail && loss>300){ tip='פספסת ניצחון כפוי!'; sub='היה רצף מנצח — '+coachMoveLabel(pre.bestMove); }
+  else if(forkAvail && !youForked){ tip='פספסת מזלג'; sub='יכולת לאיים על שני יעדים בו-זמנית: '+coachMoveLabel(pre.bestMove); }
+  else if(quality==='blunder'){ tip='טעות'; sub='עדיף היה '+coachMoveLabel(pre.bestMove); }
+  else if(after.myCapturable>before.myCapturable){ tip='השארת פוד חשוף'; sub='היריב יכול ללכוד אותו בקפיצה אחת'; }
+  else if(quality==='inacc'){ tip='לא מדויק'; sub='עדיף היה '+coachMoveLabel(pre.bestMove); }
+  else if(passive){ tip='מהלך פסיבי'; sub='לא קידם איום ולא קירב אותך לבית — נסה ליזום'; }
+  else if(youForked){ tip='מזלג! 🍴'; sub='שני איומים שהיריב לא יכול לחסום את שניהם'; }
+  else if(captured){ tip='לכידה טובה! 💪'; sub='לקחת חומר וקידמת לחץ'; }
+  else if(quality==='best'){ tip='מהלך מצוין'; sub='בדיוק מה שהמנוע היה משחק'; }
+  else { tip='מהלך טוב'; }
+  coachLast={quality,loss,tip,sub}; coachHint=null;
+  renderCoachBadge();
+}
+function renderCoachBadge(){
+  const bar=document.getElementById('coachBar');
+  if(!coachOn || !coachLast){ bar.innerHTML=''; return; }
+  if(coachLast.quality==='pending'){
+    bar.innerHTML='<div class="coach-card"><div class="coach-badge q-good">…</div><div class="coach-tip">מנתח את המהלך…</div></div>';
+    return;
+  }
+  const Q={best:['q-best','✓'],good:['q-good','✓'],inacc:['q-inacc','!'],blunder:['q-blunder','??']};
+  const q=Q[coachLast.quality]||Q.good;
+  bar.innerHTML='<div class="coach-card"><div class="coach-badge '+q[0]+'">'+q[1]+'</div>'
+    +'<div class="coach-tip">'+coachLast.tip
+    +(coachLast.sub?'<span class="sub">'+coachLast.sub+'</span>':'')+'</div></div>';
+}
+function drawCoachHint(){
+  if(!coachOn||!coachHint||busy||anim||game.winner!=null||game.toMove!==humanPlayer) return;
+  const m=coachHint, col='rgba(90,208,138,';
+  ctx.save();
+  ctx.strokeStyle=col+'.55)'; ctx.lineWidth=Math.max(3,cell*0.07); ctx.lineCap='round';
+  ctx.shadowColor=col+'.5)'; ctx.shadowBlur=6;
+  if(m.type==='add'){
+    const c=cellCenter(m.from), u=dirUnit(m.dir);
+    ctx.beginPath(); ctx.moveTo(c.x+u.x*cell*0.34,c.y+u.y*cell*0.34);
+    ctx.lineTo(c.x+u.x*cell*0.64,c.y+u.y*cell*0.64); ctx.stroke();
+    const ang=Math.atan2(u.y,u.x);
+    ctx.beginPath();
+    ctx.moveTo(c.x+u.x*cell*0.64,c.y+u.y*cell*0.64);
+    ctx.lineTo(c.x+u.x*cell*0.50-Math.sin(ang)*cell*0.07, c.y+u.y*cell*0.50+Math.cos(ang)*cell*0.07);
+    ctx.lineTo(c.x+u.x*cell*0.50+Math.sin(ang)*cell*0.07, c.y+u.y*cell*0.50-Math.cos(ang)*cell*0.07);
+    ctx.closePath(); ctx.fillStyle=col+'.55)'; ctx.fill();
+  } else {
+    const s=cellCenter(m.from), t=cellCenter(m.to);
+    const ang=Math.atan2(t.y-s.y,t.x-s.x), R=cell*0.36;
+    const ex=t.x-Math.cos(ang)*R, ey=t.y-Math.sin(ang)*R;
+    ctx.beginPath(); ctx.moveTo(s.x+Math.cos(ang)*R*0.6,s.y+Math.sin(ang)*R*0.6); ctx.lineTo(ex,ey); ctx.stroke();
+    const ha=Math.PI/6, len=cell*0.2;
+    ctx.beginPath(); ctx.moveTo(ex,ey);
+    ctx.lineTo(ex-len*Math.cos(ang-ha),ey-len*Math.sin(ang-ha));
+    ctx.lineTo(ex-len*Math.cos(ang+ha),ey-len*Math.sin(ang+ha));
+    ctx.closePath(); ctx.fillStyle=col+'.55)'; ctx.fill();
+  }
+  ctx.restore();
+}
+function coachReport(){
+  const cs=coachStats; if(!cs||cs.n===0) return '';
+  const avgLoss=cs.lossSum/cs.n;
+  const acc=Math.round(100/(1+avgLoss/120));
+  const aggr=Math.round(100*cs.constructive/cs.n);
+  const def=Math.round(100*cs.defensive/cs.n);
+  const pas=Math.round(100*cs.passive/cs.n);
+  const avgInit=Math.round(cs.initSum/cs.n), avgOppInit=Math.round(cs.oppInitSum/cs.n);
+  let profile;
+  if(aggr>=55) profile='תוקפן יוזם ⚔️';
+  else if(pas>=35) profile='פסיבי / ממתין 💤';
+  else if(def>aggr) profile='מתגונן 🛡️';
+  else profile='מאוזן ⚖️';
+  const row=(k,v)=>'<div class="row"><span>'+k+'</span><b>'+v+'</b></div>';
+  let html='<div class="coach-report"><div class="profile">סגנון: '+profile+'</div>';
+  html+=row('דיוק', acc+'%');
+  html+=row('מהלכים יוזמים', aggr+'%');
+  html+=row('יוזמה (אתה : יריב)', avgInit+' : '+avgOppInit);
+  html+=row('טעויות', cs.blunder+' גסות · '+cs.inacc+' קלות');
+  if(cs.missedForks) html+=row('מזלגים שהוחמצו', cs.missedForks);
+  if(cs.hungMoves) html+=row('פודים שהשארת חשופים', cs.hungMoves);
+  const tips=coachTips(cs,{aggr,pas,def,acc});
+  if(tips.length) html+='<div class="tips">'+tips.map(t=>'• '+t).join('<br>')+'</div>';
+  return html+'</div>';
+}
+function coachTips(cs,d){
+  const t=[];
+  if(cs.missedWins) t.push('פספסת '+cs.missedWins+' ניצחונות כפויים — כשיש רצף מנצח, אל "תסדר" עוד, סגור.');
+  if(cs.missedForks) t.push('חפש מזלגים: היו '+cs.missedForks+' מצבים שיכולת לאיים על שני יעדים בבת אחת.');
+  if(d.aggr<40) t.push('אתה הגנתי מדי ('+d.aggr+'% מהלכים יוזמים) — בנה איום משלך במקום רק להגיב.');
+  if(d.pas>=30) t.push(d.pas+'% מהמהלכים לא קידמו דבר — הימנע ממהלכי "המתנה".');
+  if(cs.hungMoves>=2) t.push('השארת פודים חשופים '+cs.hungMoves+' פעמים — בדוק אם היריב יכול לקפוץ עליך.');
+  if(cs.firstArmedMove===0 || cs.firstArmedMove>6) t.push('חמש פוד בחץ קדימה+אלכסון מוקדם — זה הבסיס לקפיצות התקפיות.');
+  if(cs.homeLapses>=2) t.push('שמור על משבצות הבית — השארת אותן חשופות '+cs.homeLapses+' פעמים.');
+  if(t.length===0) t.push('משחק נקי! נסה את רמת "קשה" לאתגר גדול יותר.');
+  return t.slice(0,3);
 }
 
 /* ---- animation ---- */
@@ -1074,10 +1408,14 @@ function newGame(){
   history=[]; selected=null; anim=null; busy=false; lastAIDiag=null;
   stats={moves:0, caps:[0,0]}; lastMove=null; clearFx();
   gameLog={d:difficulty,h:humanPlayer,moves:[],snaps:{'0':encodeBoard(game)}};
+  // reset coach: invalidate in-flight worker replies, fresh per-game tally, clear UI
+  coachGen++; coachPre=null; coachHint=null; coachLast=null; coachGradeCtx=null;
+  coachStats=freshCoachStats(); renderCoachBadge();
   document.getElementById('overlay').classList.remove('show');
   thinkingEl.textContent='';
   updateStatus(); render();
   if(game.toMove===aiPlayer) aiTurn();
+  else coachAnalyzePre(game); // it's your move — pre-compute the grade/hint while you think
 }
 function updateStatus(){
   document.getElementById('res0').textContent=game.reserve[humanPlayer];
@@ -1113,6 +1451,8 @@ function execute(m){
   // highlight the opponent's move so the player can see what the bot just did
   if(mover===aiPlayer) startHighlight(m); else lastMove=null;
   game=applyMove(pre,m);
+  // coach: grade YOUR move now — runs in the coach worker in parallel with the AI's reply
+  if(mover===humanPlayer && coachOn) coachGradeMove(pre, m, game);
   startAnim(pre,m,()=>{ postMove(); });
 }
 function postMove(){
@@ -1122,7 +1462,7 @@ function postMove(){
     game.winner = 1-game.toMove; showWin(); return;
   }
   if(game.toMove===aiPlayer) aiTurn();
-  else { busy=false; updateStatus(); }
+  else { busy=false; updateStatus(); coachAnalyzePre(game); } // your turn — prep hint/grade
 }
 function showThinking(){
   thinkingEl.innerHTML='<span>היריב חושב</span><span class="dots"><i></i><i></i><i></i></span>';
@@ -1154,6 +1494,7 @@ function showWin(){
   const mv = stats?stats.moves:0, took = stats?stats.caps[humanPlayer]:0, lost = stats?stats.caps[aiPlayer]:0;
   const stat=(v,k)=>'<div class="stat"><span class="v">'+v+'</span><span class="k">'+k+'</span></div>';
   document.getElementById('winStats').innerHTML = stat(mv,'מהלכים')+stat(took,'לכדת')+stat(lost,'נלכדו');
+  document.getElementById('coachReportBox').innerHTML = coachOn ? coachReport() : '';
   ov.classList.add('show'); busy=true;
   if(won) spawnConfetti();
   document.getElementById('undoBtn').disabled=true;
@@ -1220,8 +1561,11 @@ function undo(){
   let target=null;
   while(history.length){ const s=history.pop(); if(s.toMove===humanPlayer){ target=s; break; } target=s; }
   if(target){ game=target; selected=null; lastMove=null; clearFx();
+    // coach: drop in-flight grades/hints (the move they referred to is gone) and re-prep
+    coachGen++; coachPre=null; coachHint=null; coachLast=null; coachGradeCtx=null; renderCoachBadge();
     document.getElementById('overlay').classList.remove('show');
-    busy=false; updateStatus(); render(); }
+    busy=false; updateStatus(); render();
+    if(coachOn && game.toMove===humanPlayer) coachAnalyzePre(game); }
 }
 
 /* ---- controls ---- */
@@ -1245,6 +1589,21 @@ document.getElementById('startSeg').addEventListener('click',e=>{
 document.getElementById('newBtn').addEventListener('click',newGame);
 document.getElementById('againBtn').addEventListener('click',newGame);
 document.getElementById('undoBtn').addEventListener('click',undo);
+document.getElementById('coachBtn').addEventListener('click',e=>{
+  coachOn=!coachOn;
+  const b=e.currentTarget;
+  b.classList.toggle('coach-on',coachOn); b.setAttribute('aria-pressed',coachOn);
+  b.classList.remove('pulse'); void b.offsetWidth; b.classList.add('pulse');
+  try{ localStorage.setItem('octiCoach', coachOn?'1':'0'); }catch(_){}
+  showToast(coachOn?'מאמן פעיל 🎯 — ניתוח כל מהלך':'מאמן כבוי', coachOn?'medium':'easy');
+  if(coachOn){
+    if(!coachStats) coachStats=freshCoachStats();
+    if(!busy && !anim && game && game.winner==null && game.toMove===humanPlayer) coachAnalyzePre(game);
+  } else { coachHint=null; coachLast=null; coachPre=null; renderCoachBadge(); render(); }
+});
+// restore the toggle from last session
+try{ if(localStorage.getItem('octiCoach')==='1'){ coachOn=true;
+  const b=document.getElementById('coachBtn'); b.classList.add('coach-on'); b.setAttribute('aria-pressed','true'); } }catch(_){}
 document.getElementById('copyLogBtn').addEventListener('click',()=>{
   navigator.clipboard.writeText(document.getElementById('logOut').value).catch(()=>{});
   const b=document.getElementById('copyLogBtn');
