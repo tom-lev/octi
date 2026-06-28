@@ -80,9 +80,37 @@
   .thinking{font-size:12px;color:var(--ink-dim);min-height:16px;display:flex;align-items:center;justify-content:center;gap:8px;}
   /* ---- coach / training mode ---- */
   .btn.coach-on{background:linear-gradient(180deg,#2e5a3a,#1c3a26);border-color:#5ad08a55;color:#bff0cf;}
-  #coachBar{width:min(94vw,470px);min-height:0;display:flex;flex-direction:column;gap:6px;margin-top:2px;}
-  .coach-card{display:flex;align-items:center;gap:10px;background:#00000026;border:1px solid #ffffff14;
-    border-radius:10px;padding:8px 12px;font-size:13px;animation:coachIn .25s ease-out;}
+  /* board + side panel sit in a centered row; panel is to the RIGHT of the board on desktop */
+  .play{display:flex;gap:14px;align-items:flex-start;justify-content:center;width:100%;}
+  .board-col{display:flex;flex-direction:column;gap:12px;width:min(94vw,470px);flex:none;}
+  .stage{flex:none;width:100%;}
+  .coach-side{width:240px;flex:none;background:#00000026;border:1px solid #ffffff14;border-radius:12px;
+    padding:12px;align-self:stretch;}
+  .coach-side-head{font-size:13px;font-weight:800;color:#bff0cf;margin-bottom:9px;}
+  .coach-empty{font-size:12.5px;color:var(--ink-dim);line-height:1.55;}
+  #coachBar{display:flex;flex-direction:column;gap:6px;}
+  .coach-card{display:flex;align-items:flex-start;gap:10px;background:#00000026;border:1px solid #ffffff14;
+    border-radius:10px;padding:10px 12px;font-size:13px;animation:coachIn .25s ease-out;}
+  /* MOBILE: the side panel becomes a fixed bottom sheet — full analysis on a move, then it
+     collapses to a slim tappable pill. position:fixed ⇒ zero content push. */
+  @media (max-width:760px){
+    .play{flex-direction:column;align-items:center;}
+    .coach-side{
+      position:fixed; left:8px; right:8px; bottom:8px; width:auto; flex:none; align-self:auto;
+      z-index:40; padding:14px 12px 12px; border-radius:16px;
+      background:linear-gradient(180deg,#241a10,#1b120a); box-shadow:0 -10px 34px -12px #000;
+      transition:padding .2s ease; cursor:pointer;
+    }
+    .coach-side::before{ content:""; position:absolute; top:6px; left:50%; transform:translateX(-50%);
+      width:38px; height:4px; border-radius:2px; background:#ffffff2e; }
+    .coach-side-head{display:none;}
+    .coach-side .coach-card{border:0;background:transparent;padding:2px 2px;}
+    .coach-side .coach-empty{padding:2px 2px;}
+    /* collapsed = slim pill: hide the explanation, keep badge + verdict on one line */
+    .coach-side.collapsed{padding:10px 12px 9px;}
+    .coach-side.collapsed .coach-tip .sub{display:none;}
+    .coach-side.collapsed .coach-card{align-items:center;}
+  }
   @keyframes coachIn{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:translateY(0);}}
   .coach-badge{flex:none;width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;
     font-weight:800;font-size:15px;color:#fff;}
@@ -150,28 +178,34 @@
     <button class="btn" id="coachBtn" aria-pressed="false">מאמן 🎯</button>
   </div>
 
-  <div class="status">
-    <div class="turn"><span class="dot" id="turnDot"></span><span id="turnTxt">תורך</span></div>
-    <div class="reserves">
-      <span>החיצים שלך <b id="res0">12</b></span>
-      <span>של היריב <b id="res1">12</b></span>
-    </div>
-  </div>
-
-  <div class="stage">
-    <canvas id="cv"></canvas>
-    <canvas id="fx"></canvas>
-    <div class="overlay" id="overlay">
-      <div class="card">
-        <div class="big" id="winBig"></div>
-        <div class="sub" id="winSub"></div>
-        <div class="stats" id="winStats"></div>
-        <div id="coachReportBox"></div>
-        <button class="btn" id="againBtn">עוד משחק</button>
+  <div class="play">
+    <div class="board-col">
+      <div class="status">
+        <div class="turn"><span class="dot" id="turnDot"></span><span id="turnTxt">תורך</span></div>
+        <div class="reserves">
+          <span>החיצים שלך <b id="res0">12</b></span>
+          <span>של היריב <b id="res1">12</b></span>
+        </div>
+      </div>
+      <div class="stage">
+        <canvas id="cv"></canvas>
+        <canvas id="fx"></canvas>
+        <div class="overlay" id="overlay">
+          <div class="card">
+            <div class="big" id="winBig"></div>
+            <div class="sub" id="winSub"></div>
+            <div class="stats" id="winStats"></div>
+            <div id="coachReportBox"></div>
+            <button class="btn" id="againBtn">עוד משחק</button>
+          </div>
+        </div>
       </div>
     </div>
+    <aside class="coach-side" id="coachSide" style="display:none">
+      <div class="coach-side-head">מאמן 🎯</div>
+      <div id="coachBar"></div>
+    </aside>
   </div>
-  <div id="coachBar"></div>
   <div class="thinking" id="thinking"></div>
   <div class="toast" id="toast"></div>
   <div id="logWrap" style="display:none;width:min(94vw,470px);margin-top:2px;">
@@ -1148,11 +1182,8 @@ function coachScoreMove(prevState, move, pre, oppScore){
   const after=humanView(applyMove(prevState,move));
   // what was actually on the table (what the engine would have played)?
   const winAvail = pre.bestScore>=COACH_WIN;
-  let forkAvail=false;
-  if(pre.bestMove){
-    const bv=humanView(applyMove(prevState,pre.bestMove));
-    forkAvail = bv.myTTW1>=2 || (bv.myTTW1>=1 && bv.myTTW2>=1);
-  }
+  const bestView = pre.bestMove ? humanView(applyMove(prevState,pre.bestMove)) : null;
+  const forkAvail = !!bestView && (bestView.myTTW1>=2 || (bestView.myTTW1>=1 && bestView.myTTW2>=1));
   const youForked = after.myTTW1>=2 || (after.myTTW1>=1 && after.myTTW2>=1);
   // move quality from the centipawn-style loss
   let quality;
@@ -1176,24 +1207,59 @@ function coachScoreMove(prevState, move, pre, oppScore){
   if(winAvail && loss>300)cs.missedWins++;
   if(!cs.firstArmedMove && after.myFwdArmed>0)cs.firstArmedMove=cs.n;
   if(loss>cs.worstLoss){cs.worstLoss=loss; cs.worstMoveNo=cs.n;}
+  // Explain WHY the engine's move is better, by comparing what it achieves (bestView) with what
+  // your move achieved (after). Concrete, board-grounded reasons — not just "the engine prefers X".
+  const why = bestView ? coachWhy(after, bestView) : [];
+  const whyTxt = why.length ? why.join(' · ')
+    : (loss>60 ? 'מוותר על ~'+Math.round(loss)+' נק׳ הערכה (טקטיקה עמוקה יותר)' : '');
+  const better = 'עדיף '+coachMoveLabel(pre.bestMove)+(whyTxt?' — '+whyTxt:'');
   // live tip — most important issue first
   let tip, sub='';
-  if(winAvail && loss>300){ tip='פספסת ניצחון כפוי!'; sub='היה רצף מנצח — '+coachMoveLabel(pre.bestMove); }
-  else if(forkAvail && !youForked){ tip='פספסת מזלג'; sub='יכולת לאיים על שני יעדים בו-זמנית: '+coachMoveLabel(pre.bestMove); }
-  else if(quality==='blunder'){ tip='טעות'; sub='עדיף היה '+coachMoveLabel(pre.bestMove); }
-  else if(after.myCapturable>before.myCapturable){ tip='השארת פוד חשוף'; sub='היריב יכול ללכוד אותו בקפיצה אחת'; }
-  else if(quality==='inacc'){ tip='לא מדויק'; sub='עדיף היה '+coachMoveLabel(pre.bestMove); }
-  else if(passive){ tip='מהלך פסיבי'; sub='לא קידם איום ולא קירב אותך לבית — נסה ליזום'; }
-  else if(youForked){ tip='מזלג! 🍴'; sub='שני איומים שהיריב לא יכול לחסום את שניהם'; }
-  else if(captured){ tip='לכידה טובה! 💪'; sub='לקחת חומר וקידמת לחץ'; }
-  else if(quality==='best'){ tip='מהלך מצוין'; sub='בדיוק מה שהמנוע היה משחק'; }
-  else { tip='מהלך טוב'; }
+  if(winAvail && loss>300){ tip='פספסת ניצחון כפוי!'; sub='היה מהלך שמוביל לזכייה: '+coachMoveLabel(pre.bestMove)+(whyTxt?' — '+whyTxt:''); }
+  else if(forkAvail && !youForked){ tip='פספסת מזלג 🍴'; sub=coachMoveLabel(pre.bestMove)+' היה יוצר שני איומים בו-זמנית שאי אפשר לחסום את שניהם'; }
+  else if(quality==='blunder'){ tip='טעות'; sub=better; }
+  else if(after.myCapturable>before.myCapturable){ tip='השארת כלי חשוף'; sub='היריב יכול ללכוד אותו בקפיצה אחת. '+better; }
+  else if(quality==='inacc'){ tip='לא מדויק'; sub=better; }
+  else if(passive){ tip='מהלך פסיבי'; sub='לא קידם איום ולא קירב אותך לבית. '+(why.length?'לעומת זאת, '+better:'נסה ליזום'); }
+  else if(youForked){ tip='מזלג! 🍴'; sub='יצרת שני איומים שהיריב לא יכול לחסום את שניהם'; }
+  else if(captured){ tip='לכידה טובה! 💪'; sub='לקחת חומר של היריב וקידמת לחץ'; }
+  else if(quality==='best'){ tip='מהלך מצוין ✓'; sub='בדיוק מה שהמנוע היה בוחר'; }
+  else { tip='מהלך טוב'; sub='מהלך סביר; אין שיפור משמעותי'; }
   coachLast={quality,loss,tip,sub}; coachHint=null;
   renderCoachBadge();
 }
+// Concrete reasons the engine's move (bestView) beats yours (after) — picked by salience.
+function coachWhy(after, bestView){
+  const r=[];
+  if(bestView.opPods < after.opPods) r.push('לוכד כלי של היריב');
+  if(bestView.myTTW1>=2 || (bestView.myTTW1>=1 && bestView.myTTW2>=1)) r.push('יוצר איום כפול (מזלג)');
+  else if(bestView.myMinTTW < after.myMinTTW) r.push('מקרב כלי לבית של היריב — איום מהיר יותר');
+  else if(bestView.myThreats > after.myThreats) r.push('יוצר איום על בית היריב');
+  if(after.myCapturable > bestView.myCapturable) r.push('לא חושף כלי שלך לקפיצה (המהלך שלך חשף)');
+  if(after.opMinTTW < bestView.opMinTTW) r.push('מונע מהיריב להתקרב לבית שלך');
+  if(after.myHomeOpen > bestView.myHomeOpen) r.push('סוגר פרצה בהגנת הבית שלך');
+  if(bestView.myFwdArmed > after.myFwdArmed) r.push('מצייד כלי בחץ קדימה — מאפשר לו לתקוף');
+  else if(bestView.myInitiative > after.myInitiative+1) r.push('מקדם כלי חמוש קדימה (יוזמה)');
+  return r.slice(0,2);
+}
+let coachSheetTimer=0;
+function coachIsMobile(){ return window.matchMedia('(max-width:760px)').matches; }
+// On mobile: expand the bottom sheet to show the full analysis, then auto-collapse to a pill.
+function coachSheetExpand(){
+  const side=document.getElementById('coachSide'); if(!side) return;
+  side.classList.remove('collapsed');
+  clearTimeout(coachSheetTimer);
+  if(coachIsMobile()) coachSheetTimer=setTimeout(()=>side.classList.add('collapsed'), 5000);
+}
+function applyCoachVisibility(){
+  const side=document.getElementById('coachSide');
+  if(side){ side.style.display = coachOn ? '' : 'none'; side.classList.toggle('collapsed', coachIsMobile() && !coachLast); }
+  renderCoachBadge();
+}
 function renderCoachBadge(){
-  const bar=document.getElementById('coachBar');
-  if(!coachOn || !coachLast){ bar.innerHTML=''; return; }
+  const bar=document.getElementById('coachBar'); if(!bar) return;
+  if(!coachOn){ bar.innerHTML=''; return; }
+  if(!coachLast){ bar.innerHTML='<div class="coach-empty">שחק מהלך — ותקבל כאן ניתוח שלו: איכות, סיבה, והמהלך העדיף.</div>'; return; }
   if(coachLast.quality==='pending'){
     bar.innerHTML='<div class="coach-card"><div class="coach-badge q-good">…</div><div class="coach-tip">מנתח את המהלך…</div></div>';
     return;
@@ -1203,6 +1269,7 @@ function renderCoachBadge(){
   bar.innerHTML='<div class="coach-card"><div class="coach-badge '+q[0]+'">'+q[1]+'</div>'
     +'<div class="coach-tip">'+coachLast.tip
     +(coachLast.sub?'<span class="sub">'+coachLast.sub+'</span>':'')+'</div></div>';
+  coachSheetExpand(); // mobile: pop the bottom sheet open, then auto-collapse to a pill
 }
 function coachReport(){
   const cs=coachStats; if(!cs||cs.n===0) return '';
@@ -1378,7 +1445,7 @@ function newGame(){
   gameLog={d:difficulty,h:humanPlayer,moves:[],snaps:{'0':encodeBoard(game)}};
   // reset coach: invalidate in-flight worker replies, fresh per-game tally, clear UI
   coachGen++; coachPre=null; coachHint=null; coachLast=null; coachGradeCtx=null;
-  coachStats=freshCoachStats(); renderCoachBadge();
+  coachStats=freshCoachStats(); applyCoachVisibility();
   document.getElementById('overlay').classList.remove('show');
   thinkingEl.textContent='';
   updateStatus(); render();
@@ -1564,14 +1631,22 @@ document.getElementById('coachBtn').addEventListener('click',e=>{
   b.classList.remove('pulse'); void b.offsetWidth; b.classList.add('pulse');
   try{ localStorage.setItem('octiCoach', coachOn?'1':'0'); }catch(_){}
   showToast(coachOn?'מאמן פעיל 🎯 — ניתוח כל מהלך':'מאמן כבוי', coachOn?'medium':'easy');
+  applyCoachVisibility();
   if(coachOn){
     if(!coachStats) coachStats=freshCoachStats();
     if(!busy && !anim && game && game.winner==null && game.toMove===humanPlayer) coachAnalyzePre(game);
-  } else { coachHint=null; coachLast=null; coachPre=null; renderCoachBadge(); render(); }
+  } else { coachHint=null; coachLast=null; coachPre=null; render(); }
+});
+// tap the mobile bottom sheet to expand/collapse the full explanation
+document.getElementById('coachSide').addEventListener('click',()=>{
+  const side=document.getElementById('coachSide');
+  if(side.classList.contains('collapsed')) coachSheetExpand();
+  else { clearTimeout(coachSheetTimer); side.classList.add('collapsed'); }
 });
 // restore the toggle from last session
 try{ if(localStorage.getItem('octiCoach')==='1'){ coachOn=true;
   const b=document.getElementById('coachBtn'); b.classList.add('coach-on'); b.setAttribute('aria-pressed','true'); } }catch(_){}
+applyCoachVisibility();
 document.getElementById('copyLogBtn').addEventListener('click',()=>{
   navigator.clipboard.writeText(document.getElementById('logOut').value).catch(()=>{});
   const b=document.getElementById('copyLogBtn');
