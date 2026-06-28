@@ -171,8 +171,8 @@
       </div>
     </div>
   </div>
-  <div class="thinking" id="thinking"></div>
   <div id="coachBar"></div>
+  <div class="thinking" id="thinking"></div>
   <div class="toast" id="toast"></div>
   <div id="logWrap" style="display:none;width:min(94vw,470px);margin-top:2px;">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
@@ -1002,8 +1002,6 @@ function render(){
     drawPod(c.x,c.y,pod.player,pod.prongs,{alpha});
   }
 
-  drawCoachHint(); // faint green "best move" suggestion while you think (training mode)
-
   // selection + hints (only when human's turn, not animating)
   if(selected!=null && !anim && game.toMove===humanPlayer){
     const c=cellCenter(selected);
@@ -1132,11 +1130,10 @@ coachWorker.onmessage = (e)=>{
   const d=e.data;
   if(d.gen!==coachGen) return;               // stale reply (undo / new game)
   if(d.type==='pre'){
+    // pre-analysis is kept ONLY to grade your move afterwards (refValue/gradeDepth).
+    // No move suggestion is shown before you play — feedback is post-move only.
     coachPre={bestMove:d.move, bestScore:d.score, depth:d.depth, pv:d.pv,
               refValue:d.refValue, gradeDepth:d.gradeDepth};
-    if(coachOn && !busy && !anim && game.winner==null && game.toMove===humanPlayer){
-      coachHint=d.move; render();
-    }
   } else if(d.type==='grade'){
     const ctx=coachGradeCtx; coachGradeCtx=null;
     if(ctx && ctx.gen===coachGen) coachScoreMove(ctx.prevState, ctx.move, ctx.pre, d.score);
@@ -1206,35 +1203,6 @@ function renderCoachBadge(){
   bar.innerHTML='<div class="coach-card"><div class="coach-badge '+q[0]+'">'+q[1]+'</div>'
     +'<div class="coach-tip">'+coachLast.tip
     +(coachLast.sub?'<span class="sub">'+coachLast.sub+'</span>':'')+'</div></div>';
-}
-function drawCoachHint(){
-  if(!coachOn||!coachHint||busy||anim||game.winner!=null||game.toMove!==humanPlayer) return;
-  const m=coachHint, col='rgba(90,208,138,';
-  ctx.save();
-  ctx.strokeStyle=col+'.55)'; ctx.lineWidth=Math.max(3,cell*0.07); ctx.lineCap='round';
-  ctx.shadowColor=col+'.5)'; ctx.shadowBlur=6;
-  if(m.type==='add'){
-    const c=cellCenter(m.from), u=dirUnit(m.dir);
-    ctx.beginPath(); ctx.moveTo(c.x+u.x*cell*0.34,c.y+u.y*cell*0.34);
-    ctx.lineTo(c.x+u.x*cell*0.64,c.y+u.y*cell*0.64); ctx.stroke();
-    const ang=Math.atan2(u.y,u.x);
-    ctx.beginPath();
-    ctx.moveTo(c.x+u.x*cell*0.64,c.y+u.y*cell*0.64);
-    ctx.lineTo(c.x+u.x*cell*0.50-Math.sin(ang)*cell*0.07, c.y+u.y*cell*0.50+Math.cos(ang)*cell*0.07);
-    ctx.lineTo(c.x+u.x*cell*0.50+Math.sin(ang)*cell*0.07, c.y+u.y*cell*0.50-Math.cos(ang)*cell*0.07);
-    ctx.closePath(); ctx.fillStyle=col+'.55)'; ctx.fill();
-  } else {
-    const s=cellCenter(m.from), t=cellCenter(m.to);
-    const ang=Math.atan2(t.y-s.y,t.x-s.x), R=cell*0.36;
-    const ex=t.x-Math.cos(ang)*R, ey=t.y-Math.sin(ang)*R;
-    ctx.beginPath(); ctx.moveTo(s.x+Math.cos(ang)*R*0.6,s.y+Math.sin(ang)*R*0.6); ctx.lineTo(ex,ey); ctx.stroke();
-    const ha=Math.PI/6, len=cell*0.2;
-    ctx.beginPath(); ctx.moveTo(ex,ey);
-    ctx.lineTo(ex-len*Math.cos(ang-ha),ey-len*Math.sin(ang-ha));
-    ctx.lineTo(ex-len*Math.cos(ang+ha),ey-len*Math.sin(ang+ha));
-    ctx.closePath(); ctx.fillStyle=col+'.55)'; ctx.fill();
-  }
-  ctx.restore();
 }
 function coachReport(){
   const cs=coachStats; if(!cs||cs.n===0) return '';
