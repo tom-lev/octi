@@ -1189,7 +1189,10 @@ function coachAnalyzePre(state){
 // fire the instant you move — runs in parallel with the AI's reply (latency hidden)
 function coachGradeMove(prevState, move, newState){
   if(!coachOn || !coachPre) return;          // need the pre-analysis to compare against
-  coachGradeCtx={gen:coachGen, prevState, move, pre:coachPre};
+  // the human move's log entry was just pushed in execute(); grab it so we can attach the
+  // coach analysis (bar%, delta, quality, reason, best move) once grading completes.
+  const logEntry = (gameLog && gameLog.moves.length) ? gameLog.moves[gameLog.moves.length-1] : null;
+  coachGradeCtx={gen:coachGen, prevState, move, pre:coachPre, logEntry};
   coachHint=null;
   coachLast={quality:'pending', tip:'מנתח…', sub:''}; renderCoachBadge();
   // Grade the played move at the SAME depth used for refValue (pre.gradeDepth = pre.depth-1),
@@ -1216,10 +1219,10 @@ coachWorker.onmessage = (e)=>{
     renderCoachBadge();
   } else if(d.type==='grade'){
     const ctx=coachGradeCtx; coachGradeCtx=null;
-    if(ctx && ctx.gen===coachGen) coachScoreMove(ctx.prevState, ctx.move, ctx.pre, d.score);
+    if(ctx && ctx.gen===coachGen) coachScoreMove(ctx.prevState, ctx.move, ctx.pre, d.score, ctx.logEntry);
   }
 };
-function coachScoreMove(prevState, move, pre, oppScore){
+function coachScoreMove(prevState, move, pre, oppScore, logEntry){
   // refValue = your-POV value of the engine's best move; -oppScore = your-POV value of the move
   // you played (oppScore is the opponent's best reply, their POV). Both computed identically
   // (same depth, cleared TT), so loss = refValue - (-oppScore) = refValue + oppScore.
@@ -1279,6 +1282,13 @@ function coachScoreMove(prevState, move, pre, oppScore){
       best:coachMoveLabel(pre.bestMove,humanPlayer), why:whyTxt };
   }
   coachLast={quality,loss,tip,sub}; coachHint=null;
+  // attach the full coach analysis to this move's log entry (so a copied game log carries the
+  // feedback alongside the moves — lets me review play + feedback together)
+  if(logEntry) logEntry.coach={
+    win: (coachBaseline!=null)?coachWinPct(pre.bestScore-coachBaseline):null, // bar% at this turn
+    dlt: coachBarDelta, cz: coachBarCause,
+    q: quality, loss: Math.round(loss), cost: costPct,
+    best: coachMoveLabel(pre.bestMove,humanPlayer), tip, sub };
   renderCoachBadge();
 }
 // Map a your-POV engine value to a win probability (%). Higher K = softer/less jumpy curve, so
@@ -1632,6 +1642,16 @@ function showWin(){
   if(gameLog){
     gameLog.result=won?'human':'ai';
     gameLog.snaps['f']=encodeBoard(game);
+    // per-game coach summary for the log (only if the coach was on this game)
+    if(coachOn && coachStats && coachStats.n>0){
+      const cs=coachStats, n=cs.n;
+      gameLog.coach={ n, acc:Math.round(100/(1+(cs.lossSum/n)/120)),
+        aggr:Math.round(100*cs.constructive/n), pas:Math.round(100*cs.passive/n),
+        blunder:cs.blunder, inacc:cs.inacc, missedForks:cs.missedForks, missedWins:cs.missedWins,
+        hung:cs.hungMoves, homeLapses:cs.homeLapses, firstArmed:cs.firstArmedMove,
+        initYou:Math.round(cs.initSum/n), initOpp:Math.round(cs.oppInitSum/n),
+        crit: cs.crit?{move:cs.crit.moveNo, cost:cs.crit.cost, best:cs.crit.best, why:cs.crit.why}:null };
+    }
     allLogs.push(gameLog);
     updateLogDisplay();
   }
@@ -1754,23 +1774,3 @@ document.getElementById('clearLogBtn').addEventListener('click',()=>{
 // Load any logged board string into the live game: octiLoad("12,12:...", toMove)
 window.octiLoad=(boardStr,toMove)=>{
   game=decodeBoard(boardStr,toMove||0); selected=null; anim=null; busy=false;
-  document.getElementById('overlay').classList.remove('show');
-  updateStatus(); render(); return game;
-};
-// Ask the engine what it plays in a given position, with full diagnosis:
-// octiAnalyze("12,12:...", toMove, 'hard') -> {move, depth, score, eval, pv}
-window.octiAnalyze=(boardStr,toMove,diff)=>{
-  const st=decodeBoard(boardStr,toMove||0);
-  const r=globalThis.OCTI.pickMove(st,diff||'hard');
-  return {move:r.move, depth:r.depth, score:r.score,
-          eval:globalThis.OCTI.evaluate(st), pv:(r.pv||[]).map(encodeMove)};
-};
-
-// Only re-layout when the WIDTH changes. Mobile browsers fire 'resize' on every scroll (the URL
-// bar shows/hides, changing height) — re-laying-out on that caused needless canvas churn.
-let _lastW=window.innerWidth;
-window.addEventListener('resize',()=>{ if(window.innerWidth===_lastW) return; _lastW=window.innerWidth; layout(); render(); });
-layout(); newGame();
-</script>
-</body>
-</html>
