@@ -1774,3 +1774,23 @@ document.getElementById('clearLogBtn').addEventListener('click',()=>{
 // Load any logged board string into the live game: octiLoad("12,12:...", toMove)
 window.octiLoad=(boardStr,toMove)=>{
   game=decodeBoard(boardStr,toMove||0); selected=null; anim=null; busy=false;
+  document.getElementById('overlay').classList.remove('show');
+  updateStatus(); render(); return game;
+};
+// Ask the engine what it plays in a given position, with full diagnosis:
+// octiAnalyze("12,12:...", toMove, 'hard') -> {move, depth, score, eval, pv}
+window.octiAnalyze=(boardStr,toMove,diff)=>{
+  const st=decodeBoard(boardStr,toMove||0);
+  const r=globalThis.OCTI.pickMove(st,diff||'hard');
+  return {move:r.move, depth:r.depth, score:r.score,
+          eval:globalThis.OCTI.evaluate(st), pv:(r.pv||[]).map(encodeMove)};
+};
+
+// Only re-layout when the WIDTH changes. Mobile browsers fire 'resize' on every scroll (the URL
+// bar shows/hides, changing height) — re-laying-out on that caused needless canvas churn.
+let _lastW=window.innerWidth;
+window.addEventListener('resize',()=>{ if(window.innerWidth===_lastW) return; _lastW=window.innerWidth; layout(); render(); });
+layout(); newGame();
+</script>
+</body>
+</html>
