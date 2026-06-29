@@ -1222,73 +1222,91 @@ coachWorker.onmessage = (e)=>{
     if(ctx && ctx.gen===coachGen) coachScoreMove(ctx.prevState, ctx.move, ctx.pre, d.score, ctx.logEntry);
   }
 };
-function coachScoreMove(prevState, move, pre, oppScore, logEntry){
-  // refValue = your-POV value of the engine's best move; -oppScore = your-POV value of the move
-  // you played (oppScore is the opponent's best reply, their POV). Both computed identically
-  // (same depth, cleared TT), so loss = refValue - (-oppScore) = refValue + oppScore.
+/* ==COACH-PURE-START== (no DOM / no UI state — kept pure so the bug-finding harness in
+   scratchpad can import & test the REAL grading logic at scale). Depends only on OCTI exports
+   + the pure helpers above (coachWinPct/coachWhy/coachMoveLabel) + COACH_WIN. */
+// Grade one human move. Returns a plain object with quality, the tip/sub texts, and every flag
+// the UI needs to accumulate stats. `me` = the human player index.
+function coachGradeCore(prevState, move, pre, oppScore, baseline, me){
+  const hv=(s)=>analyzePosition({board:s.board,reserve:s.reserve,toMove:me,winner:null});
+  // refValue = your-POV value of engine's best; -oppScore = your-POV value of your move (same
+  // frame), so loss = refValue + oppScore.
   const loss=Math.max(0, pre.refValue + oppScore);
-  const before=humanView(prevState);
-  const after=humanView(applyMove(prevState,move));
-  // what was actually on the table (what the engine would have played)?
+  const before=hv(prevState), after=hv(applyMove(prevState,move));
+  const bestView = pre.bestMove ? hv(applyMove(prevState,pre.bestMove)) : null;
   const winAvail = pre.bestScore>=COACH_WIN;
-  const bestView = pre.bestMove ? humanView(applyMove(prevState,pre.bestMove)) : null;
   const forkAvail = !!bestView && (bestView.myTTW1>=2 || (bestView.myTTW1>=1 && bestView.myTTW2>=1));
   const youForked = after.myTTW1>=2 || (after.myTTW1>=1 && after.myTTW2>=1);
-  // move quality from the centipawn-style loss
+  const stillWinning = (-oppScore) >= COACH_WIN;   // your move still wins outright
+  const stillLost = pre.refValue <= -COACH_WIN;    // already lost — don't pin it on this move
+  // Move quality. Generous thresholds — the search eval is noisy (esp. early); only a real,
+  // sizable give-up is a "blunder". Keeping a forced win is always "best".
   let quality;
-  if(loss<=40) quality='best'; else if(loss<=120) quality='good';
-  else if(loss<=300) quality='inacc'; else quality='blunder';
-  // behavioural read of the move
+  if(stillWinning||loss<=50) quality='best'; else if(loss<=150) quality='good';
+  else if(loss<=500) quality='inacc'; else quality='blunder';
+  if(stillLost && quality==='blunder') quality='inacc';
+  const ok=(quality==='best'||quality==='good');
+  // behavioural read (arming a pod toward the enemy counts as constructive setup)
   const advanced=after.myMinTTW<before.myMinTTW, createdThreat=after.myThreats>before.myThreats;
   const captured=before.opPods>after.opPods, initUp=after.myInitiative>before.myInitiative;
+  const armedUp=after.myFwdArmed>before.myFwdArmed;
   const reducedExposure=after.myCapturable<before.myCapturable, defendedHome=after.myHomeOpen<before.myHomeOpen;
-  const constructive=advanced||createdThreat||captured||initUp;
+  const constructive=advanced||createdThreat||captured||initUp||armedUp;
   const defensive=!constructive && (reducedExposure||defendedHome);
   const passive=!constructive && !defensive;
-  // accumulate (clamp loss so one missed forced-win doesn't nuke the accuracy metric)
-  const cs=coachStats; cs.n++; cs.lossSum+=Math.min(loss,1500); cs[quality]++;
-  cs.initSum+=after.myInitiative; cs.oppInitSum+=after.opInitiative;
-  if(constructive)cs.constructive++; else if(defensive)cs.defensive++; else cs.passive++;
-  if(after.myCapturable>0)cs.hungMoves++;
-  if(after.myHomeOpen>0)cs.homeLapses++;
-  if(captured)cs.captures++;
-  if(forkAvail && !youForked)cs.missedForks++;
-  if(winAvail && loss>300)cs.missedWins++;
-  if(!cs.firstArmedMove && after.myFwdArmed>0)cs.firstArmedMove=cs.n;
-  if(loss>cs.worstLoss){cs.worstLoss=loss; cs.worstMoveNo=cs.n;}
-  // Explain WHY the engine's move is better, by comparing what it achieves (bestView) with what
-  // your move achieved (after). Concrete, board-grounded reasons — not just "the engine prefers X".
-  const why = bestView ? coachWhy(after, bestView) : [];
-  const whyTxt = why.length ? why.join(' · ')
-    : (loss>60 ? 'מוותר על ~'+Math.round(loss)+' נק׳ הערכה (טקטיקה עמוקה יותר)' : '');
-  const better = 'עדיף '+coachMoveLabel(pre.bestMove,humanPlayer)+(whyTxt?' — '+whyTxt:'');
-  // live tip — most important issue first
+  const why = bestView ? coachWhy(before, after, bestView) : [];
+  const whyFallback = why.length===0;
+  const whyTxt = whyFallback ? 'המנוע ראה המשך חזק יותר (טקטיקה מחושבת)' : why.join(' · ');
+  const better = 'עדיף '+coachMoveLabel(pre.bestMove,me)+' — '+whyTxt;
+  // Tip — quality gates everything: NEVER scold a best/good move; celebrate when winning.
   let tip, sub='';
-  if(winAvail && loss>300){ tip='פספסת ניצחון כפוי!'; sub='היה מהלך שמוביל לזכייה: '+coachMoveLabel(pre.bestMove,humanPlayer)+(whyTxt?' — '+whyTxt:''); }
-  else if(forkAvail && !youForked){ tip='פספסת מזלג 🍴'; sub=coachMoveLabel(pre.bestMove,humanPlayer)+' היה יוצר שני איומים בו-זמנית שאי אפשר לחסום את שניהם'; }
-  else if(quality==='blunder'){ tip='טעות'; sub=better; }
-  else if(after.myCapturable>before.myCapturable){ tip='השארת כלי חשוף'; sub='היריב יכול ללכוד אותו בקפיצה אחת. '+better; }
-  else if(quality==='inacc'){ tip='לא מדויק'; sub=better; }
-  else if(passive){ tip='מהלך פסיבי'; sub='לא קידם איום ולא קירב אותך לבית. '+(why.length?'לעומת זאת, '+better:'נסה ליזום'); }
-  else if(youForked){ tip='מזלג! 🍴'; sub='יצרת שני איומים שהיריב לא יכול לחסום את שניהם'; }
-  else if(captured){ tip='לכידה טובה! 💪'; sub='לקחת חומר של היריב וקידמת לחץ'; }
-  else if(quality==='best'){ tip='מהלך מצוין ✓'; sub='בדיוק מה שהמנוע היה בוחר'; }
-  else { tip='מהלך טוב'; sub='מהלך סביר; אין שיפור משמעותי'; }
-  // Critical moment: the move that cost the most WIN% vs the engine's best. refValue and the
-  // played value are the same frame, so their win% difference is the move's cost (frame cancels).
-  const costPct = Math.max(0, coachWinPct(pre.refValue) - coachWinPct(-oppScore));
-  if(costPct>=3 && (!cs.crit || costPct>cs.crit.cost)){
-    cs.crit={ cost:costPct, moveNo:cs.n, board:encodeBoard(prevState),
-      best:coachMoveLabel(pre.bestMove,humanPlayer), why:whyTxt };
+  if(stillWinning){
+    if(youForked){ tip='מזלג מנצח! 🍴'; sub='שני איומים שאי אפשר לחסום את שניהם'; }
+    else if(captured){ tip='לכידה מנצחת! 💪'; sub='אתה בדרך ברורה לניצחון'; }
+    else { tip='אתה מנצח ✓'; sub='העמדה זוכה — המשך לסגור אותה'; }
+  } else if(ok){
+    if(captured){ tip='לכידה טובה! 💪'; sub='לקחת חומר וקידמת לחץ'; }
+    else if(youForked){ tip='מזלג! 🍴'; sub='שני איומים שהיריב לא יכול לחסום את שניהם'; }
+    else if(advanced||createdThreat){ tip=quality==='best'?'מהלך מצוין ✓':'מהלך טוב'; sub='קידמת איום לעבר הבית'; }
+    else if(armedUp){ tip=quality==='best'?'מהלך מצוין ✓':'מהלך טוב'; sub='חימשת כלי לקראת התקפה'; }
+    else { tip=quality==='best'?'מהלך מצוין ✓':'מהלך טוב'; sub='מדויק'; }
+  } else {
+    if(winAvail){ tip='פספסת ניצחון!'; sub='היה רצף מנצח: '+coachMoveLabel(pre.bestMove,me); }
+    else if(forkAvail && !youForked){ tip='פספסת מזלג 🍴'; sub=coachMoveLabel(pre.bestMove,me)+' היה יוצר שני איומים בו-זמנית'; }
+    else if(after.myCapturable>before.myCapturable){ tip=quality==='blunder'?'טעות — כלי חשוף':'כלי חשוף'; sub='היריב יכול ללכוד אותו בקפיצה. '+better; }
+    else { tip=quality==='blunder'?'טעות':'לא מדויק'; sub=better; }
   }
-  coachLast={quality,loss,tip,sub}; coachHint=null;
-  // attach the full coach analysis to this move's log entry (so a copied game log carries the
-  // feedback alongside the moves — lets me review play + feedback together)
+  const costPct = Math.max(0, coachWinPct(pre.refValue) - coachWinPct(-oppScore));
+  const winBefore = (baseline!=null) ? coachWinPct(pre.bestScore-baseline) : null;
+  return { loss, quality, ok, tip, sub, whyTxt, whyFallback, costPct, winBefore,
+    winAvail, forkAvail, youForked, stillWinning, stillLost,
+    advanced, createdThreat, captured, initUp, armedUp, constructive, defensive, passive,
+    afterMyCapturable:after.myCapturable, beforeMyCapturable:before.myCapturable,
+    afterMyHomeOpen:after.myHomeOpen, afterMyInitiative:after.myInitiative,
+    afterOpInitiative:after.opInitiative, afterMyFwdArmed:after.myFwdArmed };
+}
+/* ==COACH-PURE-END== */
+function coachScoreMove(prevState, move, pre, oppScore, logEntry){
+  const g = coachGradeCore(prevState, move, pre, oppScore, coachBaseline, humanPlayer);
+  const cs=coachStats; cs.n++; cs.lossSum+=Math.min(g.loss,1500); cs[g.quality]++;
+  cs.initSum+=g.afterMyInitiative; cs.oppInitSum+=g.afterOpInitiative;
+  if(g.constructive)cs.constructive++; else if(g.defensive)cs.defensive++; else cs.passive++;
+  if(g.afterMyCapturable>0)cs.hungMoves++;
+  if(g.afterMyHomeOpen>0)cs.homeLapses++;
+  if(g.captured)cs.captures++;
+  if(g.forkAvail && !g.youForked)cs.missedForks++;
+  if(g.winAvail && !g.stillWinning && g.loss>500)cs.missedWins++;
+  if(!cs.firstArmedMove && g.afterMyFwdArmed>0)cs.firstArmedMove=cs.n;
+  if(g.loss>cs.worstLoss){cs.worstLoss=g.loss; cs.worstMoveNo=cs.n;}
+  if(g.costPct>=3 && (!cs.crit || g.costPct>cs.crit.cost)){
+    cs.crit={ cost:g.costPct, moveNo:cs.n, board:encodeBoard(prevState),
+      best:coachMoveLabel(pre.bestMove,humanPlayer), why:g.whyTxt };
+  }
+  coachLast={quality:g.quality, loss:g.loss, tip:g.tip, sub:g.sub}; coachHint=null;
   if(logEntry) logEntry.coach={
-    win: (coachBaseline!=null)?coachWinPct(pre.bestScore-coachBaseline):null, // bar% at this turn
-    dlt: coachBarDelta, cz: coachBarCause,
-    q: quality, loss: Math.round(loss), cost: costPct,
-    best: coachMoveLabel(pre.bestMove,humanPlayer), tip, sub };
+    win:g.winBefore, dlt:coachBarDelta, cz:coachBarCause,
+    q:g.quality, loss:Math.round(g.loss), cost:g.costPct,
+    best:coachMoveLabel(pre.bestMove,humanPlayer), tip:g.tip, sub:g.sub };
   renderCoachBadge();
 }
 // Map a your-POV engine value to a win probability (%). Higher K = softer/less jumpy curve, so
@@ -1298,17 +1316,19 @@ function coachWinPct(v){
   return Math.round(100/(1+Math.exp(-v/900)));
 }
 // Concrete reasons the engine's move (bestView) beats yours (after) — picked by salience.
-function coachWhy(after, bestView){
+function coachWhy(before, after, bestView){
   const r=[];
-  if(bestView.opPods < after.opPods) r.push('לוכד כלי של היריב');
-  if(bestView.myTTW1>=2 || (bestView.myTTW1>=1 && bestView.myTTW2>=1)) r.push('יוצר איום כפול (מזלג)');
-  else if(bestView.myMinTTW < after.myMinTTW) r.push('מקרב כלי לבית של היריב — איום מהיר יותר');
-  else if(bestView.myThreats > after.myThreats) r.push('יוצר איום על בית היריב');
-  if(after.myCapturable > bestView.myCapturable) r.push('לא חושף כלי שלך לקפיצה (המהלך שלך חשף)');
-  if(after.opMinTTW < bestView.opMinTTW) r.push('מונע מהיריב להתקרב לבית שלך');
-  if(after.myHomeOpen > bestView.myHomeOpen) r.push('סוגר פרצה בהגנת הבית שלך');
-  if(bestView.myFwdArmed > after.myFwdArmed) r.push('מצייד כלי בחץ קדימה (מכין אותו להתקפה)');
-  else if(bestView.myInitiative > after.myInitiative+1) r.push('מקדם כלי חמוש קדימה (יוזמה)');
+  // first: the DANGER your move created (absolute, most teachable) — catches tactical blunders
+  if(after.myCapturable > before.myCapturable) r.push('המהלך שלך חשף כלי לקפיצה של היריב');
+  else if(after.opMinTTW < before.opMinTTW) r.push('המהלך שלך נתן ליריב להתקרב לבית שלך');
+  else if(after.myHomeOpen > before.myHomeOpen) r.push('המהלך שלך פתח פרצה בבית שלך');
+  // then: what the engine's move achieves that yours didn't
+  if(bestView.opPods < after.opPods) r.push('המהלך המומלץ לוכד כלי של היריב');
+  else if(bestView.myTTW1>=2 || (bestView.myTTW1>=1 && bestView.myTTW2>=1)) r.push('המהלך המומלץ יוצר איום כפול (מזלג)');
+  else if(bestView.myMinTTW < after.myMinTTW) r.push('המהלך המומלץ מקרב כלי לבית של היריב');
+  else if(bestView.myThreats > after.myThreats) r.push('המהלך המומלץ יוצר איום על בית היריב');
+  else if(bestView.myFwdArmed > after.myFwdArmed) r.push('המהלך המומלץ מחמש כלי קדימה');
+  else if(bestView.myInitiative > after.myInitiative+1) r.push('המהלך המומלץ מקדם כלי חמוש קדימה');
   return r.slice(0,2);
 }
 function applyCoachVisibility(){
