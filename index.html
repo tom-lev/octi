@@ -99,6 +99,7 @@
   .coach-meter .pct small{font-size:12px;font-weight:600;color:var(--ink-dim);}
   .coach-meter .delta{font-size:14px;font-weight:800;}
   .coach-meter .delta.up{color:#5ad08a;} .coach-meter .delta.down{color:#e87a6a;} .coach-meter .delta.flat{color:var(--ink-dim);}
+  .coach-meter .coach-cause{font-size:11.5px;color:var(--ink-dim);margin-top:5px;}
   .coach-card{display:flex;align-items:flex-start;gap:10px;background:#00000026;border:1px solid #ffffff14;
     border-radius:10px;padding:10px 12px;font-size:13px;animation:coachIn .25s ease-out;}
   /* MOBILE: panel flows UNDER the board (in normal flow, never overlaying it). The win meter
@@ -870,11 +871,31 @@ let coachStats=null;     // per-game accumulation (see newGame)
 let coachStanding=null;  // your-POV eval of the CURRENT position — drives the always-on win meter
 let coachBarPct=null;    // win% the meter last displayed (for the movement delta)
 let coachBarDelta=null;  // how much the meter moved on the last update (↑/↓ points)
+let coachBarCause=null;  // short text: WHY the bar moved on the last update
+let coachPrevView=null;  // humanView() at the previous meter update (to diff for the cause)
 // Move the live meter to a new your-POV eval; delta = how much the bar actually moved.
 function coachSetStanding(v){
   const np=coachWinPct(v);
   coachBarDelta = (coachBarPct!=null) ? (np-coachBarPct) : null;
   coachStanding=v; coachBarPct=np;
+}
+// Explain a bar movement by diffing the position breakdown (prev → now). byYou = your move,
+// else it was the opponent's reply. Picks the single most salient cause.
+function coachMoveCause(prev, now, byYou){
+  if(byYou){
+    if(now.opPods<prev.opPods) return 'לכדת כלי של היריב';
+    if(now.myMinTTW<prev.myMinTTW) return 'קירבת כלי לבית של היריב';
+    if(now.myThreats>prev.myThreats) return 'יצרת איום';
+    if(now.myCapturable>prev.myCapturable) return 'חשפת כלי שלך לקפיצה';
+    if(now.myHomeOpen>prev.myHomeOpen) return 'נפתחה פרצה בבית שלך';
+    return 'מהלך שקול';
+  }
+  if(now.myPods<prev.myPods) return 'היריב לכד כלי שלך';
+  if(now.opMinTTW<prev.opMinTTW) return 'היריב קירב איום לבית שלך';
+  if(now.myCapturable>prev.myCapturable) return 'היריב מאיים ללכוד כלי שלך';
+  if(now.opThreats>prev.opThreats) return 'היריב יצר איום';
+  if(now.opPods<prev.opPods) return 'היריב איבד כלי';
+  return 'תגובת היריב';
 }
 let lastMove=null, lastMoveT0=0, hlRAF=0; // opponent's last move highlight (glowing rings)
 const HL_DUR=1200;
@@ -1195,6 +1216,9 @@ coachWorker.onmessage = (e)=>{
     // with the current position's standing (your POV) so the bar is always current.
     coachPre={bestMove:d.move, bestScore:d.score, depth:d.depth, pv:d.pv,
               refValue:d.refValue, gradeDepth:d.gradeDepth};
+    const nowView=humanView(game);   // explain what moved the bar since your last move (opponent's reply)
+    coachBarCause = coachPrevView ? coachMoveCause(coachPrevView, nowView, false) : null;
+    coachPrevView = nowView;
     coachSetStanding(d.score); renderCoachBadge();
   } else if(d.type==='grade'){
     const ctx=coachGradeCtx; coachGradeCtx=null;
@@ -1259,6 +1283,8 @@ function coachScoreMove(prevState, move, pre, oppScore){
   // it also reflects how the opponent's last reply changed things).
   const standingNow = -oppScore;
   const pct = coachWinPct(standingNow);
+  coachBarCause = coachMoveCause(before, after, true); // why YOUR move moved the bar
+  coachPrevView = after;
   coachSetStanding(standingNow);   // moves the live meter + computes the bar-movement delta
   // Critical moment: the move that cost the most WIN% vs the engine's best. Saved for the end
   // report with the position (encoded) so you can replay it and try the better idea.
@@ -1271,10 +1297,11 @@ function coachScoreMove(prevState, move, pre, oppScore){
   coachLast={quality,loss,tip,sub}; coachHint=null;
   renderCoachBadge();
 }
-// Map a your-POV engine value to a win probability (%). K=400 ≈ the eval scale of a meaningful swing.
+// Map a your-POV engine value to a win probability (%). Higher K = softer/less jumpy curve, so
+// the bar doesn't slam to 1%/99% on moderate advantages (it stays meaningful mid-game).
 function coachWinPct(v){
   if(v>=COACH_WIN) return 99; if(v<=-COACH_WIN) return 1;
-  return Math.round(100/(1+Math.exp(-v/400)));
+  return Math.round(100/(1+Math.exp(-v/900)));
 }
 // Concrete reasons the engine's move (bestView) beats yours (after) — picked by salience.
 function coachWhy(after, bestView){
@@ -1322,12 +1349,13 @@ function coachMeterHTML(){
   let deltaHTML='';
   if(!known) deltaHTML='<span class="delta flat">מעריך…</span>';
   else if(d==null) deltaHTML='';
-  else if(d>=2) deltaHTML='<span class="delta up">↑ +'+d+' התקרבת</span>';
-  else if(d<=-2) deltaHTML='<span class="delta down">↓ '+d+' התרחקת</span>';
-  else deltaHTML='<span class="delta flat">≈ ללא שינוי</span>';
+  else if(d>=2) deltaHTML='<span class="delta up">↑ +'+d+'</span>';
+  else if(d<=-2) deltaHTML='<span class="delta down">↓ '+d+'</span>';
+  else deltaHTML='<span class="delta flat">≈</span>';
+  const causeLine = (known && d!=null && coachBarCause) ? '<div class="coach-cause">'+coachBarCause+'</div>' : '';
   return '<div class="coach-meter"'+(known?'':' style="opacity:.6"')+'><div class="lbl">סיכוי הניצחון שלך</div>'
     +'<div class="track"><div class="fill" style="width:'+p+'%;background:'+col+'"></div></div>'
-    +'<div class="vals"><span class="pct">'+p+'<small>%</small></span>'+deltaHTML+'</div></div>';
+    +'<div class="vals"><span class="pct">'+p+'<small>%</small></span>'+deltaHTML+'</div>'+causeLine+'</div>';
 }
 function coachReport(){
   const cs=coachStats; if(!cs||cs.n===0) return '';
@@ -1382,7 +1410,7 @@ function coachReplay(){
   octiLoad(cr.board, humanPlayer);              // sets game, clears the win overlay, renders
   history=[]; stats={moves:0, caps:[0,0]};
   coachGen++; coachPre=null; coachLast=null; coachGradeCtx=null;
-  coachStanding=null; coachBarPct=null; coachBarDelta=null;
+  coachStanding=null; coachBarPct=null; coachBarDelta=null; coachBarCause=null; coachPrevView=null;
   busy=false; applyCoachVisibility();
   showToast('שוחזרה העמדה הקריטית — נסה מהלך טוב יותר', 'medium');
   if(coachOn) coachAnalyzePre(game);
@@ -1524,7 +1552,8 @@ function newGame(){
   gameLog={d:difficulty,h:humanPlayer,moves:[],snaps:{'0':encodeBoard(game)}};
   // reset coach: invalidate in-flight worker replies, fresh per-game tally, clear UI
   coachGen++; coachPre=null; coachHint=null; coachLast=null; coachGradeCtx=null;
-  coachStanding=0; coachBarPct=null; coachBarDelta=null; coachStats=freshCoachStats(); applyCoachVisibility();
+  coachStanding=0; coachBarPct=null; coachBarDelta=null; coachBarCause=null; coachPrevView=null;
+  coachStats=freshCoachStats(); applyCoachVisibility();
   document.getElementById('overlay').classList.remove('show');
   thinkingEl.textContent='';
   updateStatus(); render();
@@ -1678,7 +1707,8 @@ function undo(){
   if(target){ game=target; selected=null; lastMove=null; clearFx();
     // coach: drop in-flight grades (the move they referred to is gone) and re-prep. Keep the
     // meter showing the (now reverted) standing — pre() will refresh it for the new position.
-    coachGen++; coachPre=null; coachHint=null; coachLast=null; coachGradeCtx=null; coachStanding=null; coachBarPct=null; coachBarDelta=null; renderCoachBadge();
+    coachGen++; coachPre=null; coachHint=null; coachLast=null; coachGradeCtx=null;
+    coachStanding=null; coachBarPct=null; coachBarDelta=null; coachBarCause=null; coachPrevView=null; renderCoachBadge();
     document.getElementById('overlay').classList.remove('show');
     busy=false; updateStatus(); render();
     if(coachOn && game.toMove===humanPlayer) coachAnalyzePre(game); }
