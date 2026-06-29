@@ -1784,3 +1784,8 @@ window.octiAnalyze=(boardStr,toMove,diff)=>{
 // Only re-layout when the WIDTH changes. Mobile browsers fire 'resize' on every scroll (the URL
 // bar shows/hides, changing height) — re-laying-out on that caused needless canvas churn.
 let _lastW=window.innerWidth;
+window.addEventListener('resize',()=>{ if(window.innerWidth===_lastW) return; _lastW=window.innerWidth; layout(); render(); });
+layout(); newGame();
+</script>
+</body>
+</html>
