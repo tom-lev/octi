@@ -63,10 +63,13 @@
 
   .overlay{
     position:absolute;inset:0;display:none;align-items:center;justify-content:center;
-    background:#0a0603cc;border-radius:10px;backdrop-filter:blur(2px);z-index:10;
+    background:#0a0603ee;border-radius:10px;backdrop-filter:blur(3px);z-index:10;
+    overflow:auto;padding:10px;
   }
   .overlay.show{display:flex;}
-  .card{text-align:center;padding:22px 26px;}
+  /* solid panel so a long coach report never shows the board through it, and scrolls if tall */
+  .card{text-align:center;padding:18px 22px;background:#1b120a;border:1px solid #ffffff1f;
+    border-radius:14px;box-shadow:0 20px 50px -16px #000;max-height:100%;overflow-y:auto;max-width:100%;}
   .card .big{font-size:26px;font-weight:800;margin-bottom:4px;}
   .card .sub{color:var(--ink-dim);font-size:14px;margin-bottom:16px;}
 
@@ -838,12 +841,11 @@ self.onmessage = function(e){
 const coachWorker = new Worker(URL.createObjectURL(
   new Blob([CORE_SRC + coachGlue], {type:'application/javascript'})
 ));
-// Grading strength. The engine realistically reaches ~depth 9-10 in a few seconds (FINDINGS.md),
-// which is already its full "hard" strength and plenty to flag blunders/forks. The depth cap is
-// effectively unreachable — BUDGET is the real knob. Kept short so 'pre' usually completes before
-// you move (hint ready) and 'grade' fits inside the AI's reply time. Raise BUDGET for stronger
-// grading at the cost of the hint/badge sometimes lagging.
-const COACH_DEPTH = 16, COACH_BUDGET = 3000;
+// Grading strength. FIXED depth (not a time budget) so analysis is DETERMINISTIC — the same
+// position always yields the same win%, so the bar never drifts on its own. Depth 9 ≈ the engine's
+// real "hard" strength (FINDINGS.md) and is plenty to flag blunders/forks. Budget is effectively
+// infinite so it always reaches the fixed depth; the depth cap terminates the loop (no hang).
+const COACH_DEPTH = 9, COACH_BUDGET = 1e9;
 
 /* =================== UI / RENDER =================== */
 const cv = document.getElementById('cv');
@@ -1779,8 +1781,6 @@ window.octiAnalyze=(boardStr,toMove,diff)=>{
           eval:globalThis.OCTI.evaluate(st), pv:(r.pv||[]).map(encodeMove)};
 };
 
-window.addEventListener('resize',()=>{ layout(); render(); });
-layout(); newGame();
-</script>
-</body>
-</html>
+// Only re-layout when the WIDTH changes. Mobile browsers fire 'resize' on every scroll (the URL
+// bar shows/hides, changing height) — re-laying-out on that caused needless canvas churn.
+let _lastW=window.innerWidth;
