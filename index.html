@@ -101,27 +101,11 @@
   .coach-meter .delta.up{color:#5ad08a;} .coach-meter .delta.down{color:#e87a6a;} .coach-meter .delta.flat{color:var(--ink-dim);}
   .coach-card{display:flex;align-items:flex-start;gap:10px;background:#00000026;border:1px solid #ffffff14;
     border-radius:10px;padding:10px 12px;font-size:13px;animation:coachIn .25s ease-out;}
-  /* MOBILE: the side panel becomes a fixed bottom sheet — full analysis on a move, then it
-     collapses to a slim tappable pill. position:fixed ⇒ zero content push. */
+  /* MOBILE: panel flows UNDER the board (in normal flow, never overlaying it). The win meter
+     stays permanently visible at the top of the panel. */
   @media (max-width:760px){
     .play{flex-direction:column;align-items:center;}
-    .coach-side{
-      position:fixed; left:8px; right:8px; bottom:8px; width:auto; flex:none; align-self:auto;
-      z-index:40; padding:14px 12px 12px; border-radius:16px;
-      background:linear-gradient(180deg,#241a10,#1b120a); box-shadow:0 -10px 34px -12px #000;
-      transition:padding .2s ease; cursor:pointer;
-    }
-    .coach-side::before{ content:""; position:absolute; top:6px; left:50%; transform:translateX(-50%);
-      width:38px; height:4px; border-radius:2px; background:#ffffff2e; }
-    .coach-side-head{display:none;}
-    .coach-side .coach-card{border:0;background:transparent;padding:2px 2px;}
-    .coach-side .coach-meter{border:0;background:transparent;padding:2px 2px;}
-    .coach-side .coach-empty{padding:2px 2px;}
-    /* collapsed = slim pill: keep the win meter + verdict line, hide the long explanation */
-    .coach-side.collapsed{padding:10px 12px 9px;}
-    .coach-side.collapsed .coach-tip .sub{display:none;}
-    .coach-side.collapsed .coach-meter .lbl{display:none;}
-    .coach-side.collapsed .coach-card{align-items:center;}
+    .coach-side{width:min(94vw,470px);align-self:auto;}
   }
   @keyframes coachIn{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:translateY(0);}}
   .coach-badge{flex:none;width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;
@@ -883,7 +867,15 @@ let coachPre=null;       // {bestMove,bestScore,depth,pv,breakdown} for the posi
 let coachHint=null;      // best move to draw as a faint hint arrow while you think
 let coachLast=null;      // {quality,loss,tip,sub,pct,delta} for the feedback after your last move
 let coachStats=null;     // per-game accumulation (see newGame)
-let coachLastStanding=null; // your-POV eval after your previous move (for the closer/further delta)
+let coachStanding=null;  // your-POV eval of the CURRENT position — drives the always-on win meter
+let coachBarPct=null;    // win% the meter last displayed (for the movement delta)
+let coachBarDelta=null;  // how much the meter moved on the last update (↑/↓ points)
+// Move the live meter to a new your-POV eval; delta = how much the bar actually moved.
+function coachSetStanding(v){
+  const np=coachWinPct(v);
+  coachBarDelta = (coachBarPct!=null) ? (np-coachBarPct) : null;
+  coachStanding=v; coachBarPct=np;
+}
 let lastMove=null, lastMoveT0=0, hlRAF=0; // opponent's last move highlight (glowing rings)
 const HL_DUR=1200;
 let particles=[], fxRAF=0; // fx-canvas particle system (capture sparkles, +N text, confetti)
@@ -1199,10 +1191,11 @@ coachWorker.onmessage = (e)=>{
   const d=e.data;
   if(d.gen!==coachGen) return;               // stale reply (undo / new game)
   if(d.type==='pre'){
-    // pre-analysis is kept ONLY to grade your move afterwards (refValue/gradeDepth).
-    // No move suggestion is shown before you play — feedback is post-move only.
+    // pre-analysis grades your next move (refValue/gradeDepth) AND updates the live win meter
+    // with the current position's standing (your POV) so the bar is always current.
     coachPre={bestMove:d.move, bestScore:d.score, depth:d.depth, pv:d.pv,
               refValue:d.refValue, gradeDepth:d.gradeDepth};
+    coachSetStanding(d.score); renderCoachBadge();
   } else if(d.type==='grade'){
     const ctx=coachGradeCtx; coachGradeCtx=null;
     if(ctx && ctx.gen===coachGen) coachScoreMove(ctx.prevState, ctx.move, ctx.pre, d.score);
@@ -1266,8 +1259,7 @@ function coachScoreMove(prevState, move, pre, oppScore){
   // it also reflects how the opponent's last reply changed things).
   const standingNow = -oppScore;
   const pct = coachWinPct(standingNow);
-  const delta = (coachLastStanding!=null) ? (pct - coachWinPct(coachLastStanding)) : null;
-  coachLastStanding = standingNow;
+  coachSetStanding(standingNow);   // moves the live meter + computes the bar-movement delta
   // Critical moment: the move that cost the most WIN% vs the engine's best. Saved for the end
   // report with the position (encoded) so you can replay it and try the better idea.
   const costPct = coachWinPct(pre.refValue) - pct;
@@ -1276,7 +1268,7 @@ function coachScoreMove(prevState, move, pre, oppScore){
       best:coachMoveLabel(pre.bestMove,humanPlayer), why:whyTxt,
       pctBefore:coachWinPct(pre.refValue), pctAfter:pct };
   }
-  coachLast={quality,loss,tip,sub,pct,delta}; coachHint=null;
+  coachLast={quality,loss,tip,sub}; coachHint=null;
   renderCoachBadge();
 }
 // Map a your-POV engine value to a win probability (%). K=400 ≈ the eval scale of a meaningful swing.
@@ -1298,48 +1290,42 @@ function coachWhy(after, bestView){
   else if(bestView.myInitiative > after.myInitiative+1) r.push('מקדם כלי חמוש קדימה (יוזמה)');
   return r.slice(0,2);
 }
-let coachSheetTimer=0;
-function coachIsMobile(){ return window.matchMedia('(max-width:760px)').matches; }
-// On mobile: expand the bottom sheet to show the full analysis, then auto-collapse to a pill.
-function coachSheetExpand(){
-  const side=document.getElementById('coachSide'); if(!side) return;
-  side.classList.remove('collapsed');
-  clearTimeout(coachSheetTimer);
-  if(coachIsMobile()) coachSheetTimer=setTimeout(()=>side.classList.add('collapsed'), 5000);
-}
 function applyCoachVisibility(){
   const side=document.getElementById('coachSide');
-  if(side){ side.style.display = coachOn ? '' : 'none'; side.classList.toggle('collapsed', coachIsMobile() && !coachLast); }
+  if(side) side.style.display = coachOn ? '' : 'none';
   renderCoachBadge();
 }
 function renderCoachBadge(){
   const bar=document.getElementById('coachBar'); if(!bar) return;
   if(!coachOn){ bar.innerHTML=''; return; }
-  if(!coachLast){ bar.innerHTML='<div class="coach-empty">שחק מהלך — ותקבל כאן ניתוח שלו: איכות, סיבה, והמהלך העדיף.</div>'; return; }
-  if(coachLast.quality==='pending'){
-    bar.innerHTML='<div class="coach-card"><div class="coach-badge q-good">…</div><div class="coach-tip">מנתח את המהלך…</div></div>';
-    return;
+  let html = coachMeterHTML();                 // the win meter is ALWAYS shown, updates every turn
+  if(coachLast && coachLast.quality==='pending')
+    html += '<div class="coach-card"><div class="coach-badge q-good">…</div><div class="coach-tip">מנתח את המהלך…</div></div>';
+  else if(coachLast){
+    const Q={best:['q-best','✓'],good:['q-good','✓'],inacc:['q-inacc','!'],blunder:['q-blunder','??']};
+    const q=Q[coachLast.quality]||Q.good;
+    html += '<div class="coach-card"><div class="coach-badge '+q[0]+'">'+q[1]+'</div>'
+      +'<div class="coach-tip">'+coachLast.tip
+      +(coachLast.sub?'<span class="sub">'+coachLast.sub+'</span>':'')+'</div></div>';
+  } else {
+    html += '<div class="coach-empty">שחק מהלך — ותקבל ניתוח: איכות, סיבה, והמהלך העדיף.</div>';
   }
-  const Q={best:['q-best','✓'],good:['q-good','✓'],inacc:['q-inacc','!'],blunder:['q-blunder','??']};
-  const q=Q[coachLast.quality]||Q.good;
-  bar.innerHTML = coachMeterHTML(coachLast)
-    +'<div class="coach-card"><div class="coach-badge '+q[0]+'">'+q[1]+'</div>'
-    +'<div class="coach-tip">'+coachLast.tip
-    +(coachLast.sub?'<span class="sub">'+coachLast.sub+'</span>':'')+'</div></div>';
-  coachSheetExpand(); // mobile: pop the bottom sheet open, then auto-collapse to a pill
+  bar.innerHTML = html;
 }
-// The "closer/further to winning" meter: a fill bar + win% + the change since your last move.
-function coachMeterHTML(c){
-  if(typeof c.pct!=='number') return '';
-  const p=c.pct;
-  // red → amber → green by win%
+// Permanent "closer/further to winning" meter: current win% (from coachStanding) + the change
+// the meter last moved (coachBarDelta). Shows a muted loading state until the first eval.
+function coachMeterHTML(){
+  const known = (coachStanding!=null);
+  const p = known ? coachWinPct(coachStanding) : 50;
   const col = p>=60?'#2fa86a' : p>=40?'#d6a23a' : '#d05a5a';
+  const d = coachBarDelta;
   let deltaHTML='';
-  if(c.delta==null) deltaHTML='<span class="delta flat">—</span>';
-  else if(c.delta>=2) deltaHTML='<span class="delta up">↑ +'+c.delta+' התקרבת</span>';
-  else if(c.delta<=-2) deltaHTML='<span class="delta down">↓ '+c.delta+' התרחקת</span>';
+  if(!known) deltaHTML='<span class="delta flat">מעריך…</span>';
+  else if(d==null) deltaHTML='';
+  else if(d>=2) deltaHTML='<span class="delta up">↑ +'+d+' התקרבת</span>';
+  else if(d<=-2) deltaHTML='<span class="delta down">↓ '+d+' התרחקת</span>';
   else deltaHTML='<span class="delta flat">≈ ללא שינוי</span>';
-  return '<div class="coach-meter"><div class="lbl">סיכוי הניצחון שלך</div>'
+  return '<div class="coach-meter"'+(known?'':' style="opacity:.6"')+'><div class="lbl">סיכוי הניצחון שלך</div>'
     +'<div class="track"><div class="fill" style="width:'+p+'%;background:'+col+'"></div></div>'
     +'<div class="vals"><span class="pct">'+p+'<small>%</small></span>'+deltaHTML+'</div></div>';
 }
@@ -1395,7 +1381,8 @@ function coachReplay(){
   const cr=coachStats&&coachStats.crit; if(!cr) return;
   octiLoad(cr.board, humanPlayer);              // sets game, clears the win overlay, renders
   history=[]; stats={moves:0, caps:[0,0]};
-  coachGen++; coachPre=null; coachLast=null; coachLastStanding=null; coachGradeCtx=null;
+  coachGen++; coachPre=null; coachLast=null; coachGradeCtx=null;
+  coachStanding=null; coachBarPct=null; coachBarDelta=null;
   busy=false; applyCoachVisibility();
   showToast('שוחזרה העמדה הקריטית — נסה מהלך טוב יותר', 'medium');
   if(coachOn) coachAnalyzePre(game);
@@ -1537,7 +1524,7 @@ function newGame(){
   gameLog={d:difficulty,h:humanPlayer,moves:[],snaps:{'0':encodeBoard(game)}};
   // reset coach: invalidate in-flight worker replies, fresh per-game tally, clear UI
   coachGen++; coachPre=null; coachHint=null; coachLast=null; coachGradeCtx=null;
-  coachLastStanding=null; coachStats=freshCoachStats(); applyCoachVisibility();
+  coachStanding=0; coachBarPct=null; coachBarDelta=null; coachStats=freshCoachStats(); applyCoachVisibility();
   document.getElementById('overlay').classList.remove('show');
   thinkingEl.textContent='';
   updateStatus(); render();
@@ -1689,8 +1676,9 @@ function undo(){
   let target=null;
   while(history.length){ const s=history.pop(); if(s.toMove===humanPlayer){ target=s; break; } target=s; }
   if(target){ game=target; selected=null; lastMove=null; clearFx();
-    // coach: drop in-flight grades/hints (the move they referred to is gone) and re-prep
-    coachGen++; coachPre=null; coachHint=null; coachLast=null; coachGradeCtx=null; coachLastStanding=null; renderCoachBadge();
+    // coach: drop in-flight grades (the move they referred to is gone) and re-prep. Keep the
+    // meter showing the (now reverted) standing — pre() will refresh it for the new position.
+    coachGen++; coachPre=null; coachHint=null; coachLast=null; coachGradeCtx=null; coachStanding=null; coachBarPct=null; coachBarDelta=null; renderCoachBadge();
     document.getElementById('overlay').classList.remove('show');
     busy=false; updateStatus(); render();
     if(coachOn && game.toMove===humanPlayer) coachAnalyzePre(game); }
@@ -1730,12 +1718,6 @@ document.getElementById('coachBtn').addEventListener('click',e=>{
     if(!busy && !anim && game && game.winner==null && game.toMove===humanPlayer) coachAnalyzePre(game);
   } else { coachHint=null; coachLast=null; coachPre=null; }
   render(); // refresh the board so the A–F / 1–7 coordinate labels appear/disappear
-});
-// tap the mobile bottom sheet to expand/collapse the full explanation
-document.getElementById('coachSide').addEventListener('click',()=>{
-  const side=document.getElementById('coachSide');
-  if(side.classList.contains('collapsed')) coachSheetExpand();
-  else { clearTimeout(coachSheetTimer); side.classList.add('collapsed'); }
 });
 // restore the toggle from last session
 try{ if(localStorage.getItem('octiCoach')==='1'){ coachOn=true;
